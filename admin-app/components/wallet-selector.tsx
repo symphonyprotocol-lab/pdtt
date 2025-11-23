@@ -22,10 +22,8 @@ import {
   Copy,
   LogOut,
   User,
-  Settings,
 } from "lucide-react";
 import { useCallback, useState } from "react";
-import { useRouter } from "next/navigation";
 import { Button } from "./ui/button";
 import {
   Collapsible,
@@ -50,7 +48,6 @@ import { toast } from "sonner";
 export function WalletSelector(walletSortingOptions: WalletSortingOptions) {
   const { account, connected, disconnect, wallet } = useWallet();
   const [isDialogOpen, setIsDialogOpen] = useState(false);
-  const router = useRouter();
 
   const closeDialog = useCallback(() => setIsDialogOpen(false), []);
 
@@ -64,10 +61,6 @@ export function WalletSelector(walletSortingOptions: WalletSortingOptions) {
     }
   }, [account]);
 
-  const goToSettings = useCallback(() => {
-    router.push("/settings");
-  }, [router]);
-
   return connected ? (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -80,9 +73,6 @@ export function WalletSelector(walletSortingOptions: WalletSortingOptions) {
       <DropdownMenuContent align="end">
         <DropdownMenuItem onSelect={copyAddress} className="gap-2">
           <Copy className="h-4 w-4" /> Copy address
-        </DropdownMenuItem>
-        <DropdownMenuItem onSelect={goToSettings} className="gap-2">
-          <Settings className="h-4 w-4" /> Settings
         </DropdownMenuItem>
         {wallet && isPetraWebWallet(wallet) && (
           <DropdownMenuItem asChild>
@@ -295,3 +285,4 @@ function renderEducationScreen(screen: AboutPetraWebEducationScreen) {
     </>
   );
 }
+

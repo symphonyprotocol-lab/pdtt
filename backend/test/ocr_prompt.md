@@ -41,7 +41,9 @@ Input Json is:
         "unit_price": 0.0,
         "discount": 0.0,
         "amount": 0.0,
-        "currency": "MYR"
+        "currency": "MYR",
+        "category": "",
+        "sub_category": ""
       }
     ],
     "summary": {
@@ -83,5 +85,9 @@ Input Json is:
 - Preserve multilingual text (Chinese, Malay, English) exactly as shown.
 - Do not guess missing data.
 - Always include `currency` as "$" unless clearly another.
+- For each item, assign the most appropriate `category` and `sub_category` from the available categories list below.
+- Match item descriptions to the closest category/subcategory. If unsure, use the most general category that fits.
+
+{{categories}}
 
 Return only the final JSON.

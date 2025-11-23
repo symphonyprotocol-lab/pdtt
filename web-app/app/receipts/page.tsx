@@ -130,10 +130,26 @@ interface ReceiptsResponse {
   }
 }
 
+interface Category {
+  id: string
+  name: string
+  display_order: number
+  subcategories: Array<{
+    id: string
+    name: string
+    display_order: number
+  }>
+}
+
+interface CategoriesResponse {
+  categories: Category[]
+}
+
 export default function ReceiptsPage() {
   const { account, connected } = useWallet()
   const [spendingData, setSpendingData] = useState<MonthlySpendingResponse | null>(null)
   const [allReceipts, setAllReceipts] = useState<Receipt[]>([])
+  const [categories, setCategories] = useState<Category[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [selectedReceipt, setSelectedReceipt] = useState<Receipt | null>(null)
@@ -161,10 +177,11 @@ export default function ReceiptsPage() {
       setLoading(true)
       setError(null)
       try {
-        // Fetch both spending data and receipts
-        const [spendingResponse, receiptsResponse] = await Promise.all([
+        // Fetch spending data, receipts, and categories
+        const [spendingResponse, receiptsResponse, categoriesResponse] = await Promise.all([
           fetch(buildApiUrl(`/spending/${walletAddress}`)),
           fetch(buildApiUrl(`/receipts/${walletAddress}`)),
+          fetch(buildApiUrl(`/categories`)),
         ])
 
         if (!spendingResponse.ok) {
@@ -173,12 +190,19 @@ export default function ReceiptsPage() {
         if (!receiptsResponse.ok) {
           throw new Error("Failed to fetch receipts")
         }
+        if (!categoriesResponse.ok) {
+          console.warn("Failed to fetch categories, using defaults")
+        }
 
         const spendingData: MonthlySpendingResponse = await spendingResponse.json()
         const receiptsData: ReceiptsResponse = await receiptsResponse.json()
+        const categoriesData: CategoriesResponse = categoriesResponse.ok 
+          ? await categoriesResponse.json()
+          : { categories: [] }
 
         setSpendingData(spendingData)
         setAllReceipts(receiptsData.receipts)
+        setCategories(categoriesData.categories)
       } catch (err) {
         console.error("Error fetching data:", err)
         setError(err instanceof Error ? err.message : "Failed to load data")
@@ -208,16 +232,34 @@ export default function ReceiptsPage() {
   }
 
   const getCategoryColor = (category: string) => {
-    const colors: Record<string, string> = {
-      "Food & Dining": "from-orange-500/20 to-red-500/20 border-orange-400/30",
-      "Groceries": "from-green-500/20 to-emerald-500/20 border-green-400/30",
-      "Shopping": "from-purple-500/20 to-pink-500/20 border-purple-400/30",
-      "Health & Pharmacy": "from-blue-500/20 to-cyan-500/20 border-blue-400/30",
-      "Transportation": "from-yellow-500/20 to-amber-500/20 border-yellow-400/30",
-      "Entertainment": "from-indigo-500/20 to-violet-500/20 border-indigo-400/30",
-      "Other": "from-slate-500/20 to-gray-500/20 border-slate-400/30",
+    // Color palette for categories - assign colors based on category name or index
+    const colorPalette = [
+      "from-orange-500/20 to-red-500/20 border-orange-400/30",
+      "from-green-500/20 to-emerald-500/20 border-green-400/30",
+      "from-purple-500/20 to-pink-500/20 border-purple-400/30",
+      "from-blue-500/20 to-cyan-500/20 border-blue-400/30",
+      "from-yellow-500/20 to-amber-500/20 border-yellow-400/30",
+      "from-indigo-500/20 to-violet-500/20 border-indigo-400/30",
+      "from-teal-500/20 to-cyan-500/20 border-teal-400/30",
+      "from-rose-500/20 to-pink-500/20 border-rose-400/30",
+      "from-lime-500/20 to-green-500/20 border-lime-400/30",
+      "from-amber-500/20 to-orange-500/20 border-amber-400/30",
+      "from-sky-500/20 to-blue-500/20 border-sky-400/30",
+      "from-slate-500/20 to-gray-500/20 border-slate-400/30",
+    ]
+    
+    // Try to find category in database categories
+    const categoryIndex = categories.findIndex(cat => cat.name === category)
+    if (categoryIndex >= 0) {
+      return colorPalette[categoryIndex % colorPalette.length]
     }
-    return colors[category] || colors["Other"]
+    
+    // Fallback to hash-based color assignment
+    let hash = 0
+    for (let i = 0; i < category.length; i++) {
+      hash = category.charCodeAt(i) + ((hash << 5) - hash)
+    }
+    return colorPalette[Math.abs(hash) % colorPalette.length]
   }
 
   const calculatePercentage = (value: number, total: number) => {

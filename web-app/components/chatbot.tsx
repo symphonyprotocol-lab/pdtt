@@ -10,6 +10,7 @@ import Image from "next/image"
 import { WalletSelector } from "@/components/wallet-selector"
 import { useWallet } from "@aptos-labs/wallet-adapter-react"
 import { ReceiptViewer } from "@/components/receipt-viewer"
+import { NotificationIcon } from "@/components/notification-icon"
 import Link from "next/link"
 
 const API_BASE =
@@ -116,6 +117,10 @@ export function Chatbot() {
           const data: ApiChatResponse = await commandResponse.json()
           setMessages(mapApiMessages(data.messages ?? []))
           setSelectedImage(null) // Clear selected image after sending
+          // Reset file input after successful send
+          if (fileInputRef.current) {
+            fileInputRef.current.value = ""
+          }
         } catch (error) {
           console.error("Error sending receipt command:", error)
           setChatError("Failed to process receipt. Please try again.")
@@ -127,6 +132,10 @@ export function Chatbot() {
       console.error("Error uploading image:", error)
       const errorMessage = error instanceof Error ? error.message : "Failed to upload image"
       alert(errorMessage)
+      // Reset file input on error
+      if (fileInputRef.current) {
+        fileInputRef.current.value = ""
+      }
     } finally {
       setUploadingImage(false)
     }
@@ -234,6 +243,10 @@ export function Chatbot() {
       setMessages([])
       setSelectedImage(null)
       setChatError(null)
+      // Reset file input
+      if (fileInputRef.current) {
+        fileInputRef.current.value = ""
+      }
       return
     }
 
@@ -258,6 +271,10 @@ export function Chatbot() {
       setMessages([])
       setSelectedImage(null)
       setChatError(null)
+      // Reset file input to allow selecting the same file again
+      if (fileInputRef.current) {
+        fileInputRef.current.value = ""
+      }
     } catch (error) {
       console.error("Error deleting conversation:", error)
       const errorMessage = error instanceof Error ? error.message : "Unable to delete conversation. Please try again later."
@@ -289,6 +306,7 @@ export function Chatbot() {
               </h1>
             </div>
             <div className="flex items-center gap-3">
+              <NotificationIcon />
               <WalletSelector />
               {canChat && messages.length > 0 && (
                 <Button
