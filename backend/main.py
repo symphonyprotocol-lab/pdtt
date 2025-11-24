@@ -217,6 +217,7 @@ class UserVoucher(Base):
     notification_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False, index=True)
     campaign_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False, index=True)
     voucher_detail: Mapped[dict] = mapped_column(JSON)  # Stores coupon design details
+    condition: Mapped[str | None] = mapped_column(Text, nullable=True)  # AI-readable validation criteria for receipt matching
     status: Mapped[str] = mapped_column(String(32), default="wait_to_user", index=True)  # wait_to_user, accepted, declined, used, expired
     created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
     accepted_at: Mapped[datetime | None] = mapped_column(nullable=True)
@@ -1918,6 +1919,49 @@ async def create_campaign(
     )
 
 
+@app.get("/api/campaigns/detail/{job_id}", response_model=CampaignResource)
+async def get_campaign_detail(
+    job_id: str,
+    session: SessionDep,
+) -> CampaignResource:
+    """Get specific campaign details by ID."""
+    try:
+        campaign_uuid = UUID(job_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid campaign ID format",
+        )
+    
+    stmt = select(Campaign).where(Campaign.id == campaign_uuid)
+    result = await session.execute(stmt)
+    campaign = result.scalar_one_or_none()
+    
+    if not campaign:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Campaign not found",
+        )
+        
+    return CampaignResource(
+        id=str(campaign.id),
+        query=campaign.query,
+        targetGroup=campaign.target_group,
+        budget=campaign.budget,
+        status=campaign.status,
+        userCount=campaign.user_count,
+        couponSent=campaign.coupon_sent,
+        couponUsed=campaign.coupon_used,
+        targetWalletAddresses=campaign.target_wallet_addresses or [],
+        userPortrait=campaign.user_portrait or {},
+        couponDesign=campaign.coupon_design or {},
+        createdAt=campaign.created_at,
+        startedAt=campaign.started_at,
+        completedAt=campaign.completed_at,
+        stoppedAt=campaign.stopped_at,
+    )
+
+
 @app.get("/api/campaigns/{wallet_address}", response_model=CampaignsResponse)
 async def get_campaigns(
     wallet_address: str,
@@ -2017,18 +2061,28 @@ async def campaign_action(
         # Create notifications for each target user
         if campaign.target_wallet_addresses:
             notifications = []
+            # Calculate amount per user (45% of budget)
+            budget_for_user_rate = 0.45
+            amount_per_user = 0
+            if len(campaign.target_wallet_addresses) > 0:
+                amount_per_user = (campaign.budget * budget_for_user_rate) / len(campaign.target_wallet_addresses)
+
             for target_address in campaign.target_wallet_addresses:
                 normalized_target = _normalize_wallet_address(target_address)
                 # Generate notification title and content based on campaign
                 notification_title = f"Special Offer: {campaign.target_group}"
                 notification_content = f"You've received a special coupon! {campaign.coupon_design.get('description', 'Check out this exclusive offer.')}"
                 
+                # Add amount to voucher detail
+                voucher_detail = campaign.coupon_design.copy()
+                voucher_detail['tokenAmount'] = amount_per_user
+
                 notification = Notification(
                     campaign_id=campaign.id,
                     target_user_address=normalized_target,
                     title=notification_title,
                     content=notification_content,
-                    voucher_detail=campaign.coupon_design,
+                    voucher_detail=voucher_detail,
                     delivered=False,
                     user_accepted=False,
                 )
@@ -2195,12 +2249,25 @@ async def mark_notification_accepted(
         notification.user_accepted = True
         notification.accepted_at = datetime.utcnow()
         
+        # Fetch campaign to generate condition
+        campaign_stmt = select(Campaign).where(Campaign.id == notification.campaign_id)
+        campaign_result = await session.execute(campaign_stmt)
+        campaign = campaign_result.scalar_one_or_none()
+        
+        # Generate AI-readable condition for receipt validation
+        condition = None
+        if campaign:
+            target_group = campaign.target_group or "general purchases"
+            description = notification.voucher_detail.get('description', '')
+            condition = f"Valid for {target_group}. {description}".strip()
+        
         # Create voucher in user_vouchers table
         voucher = UserVoucher(
             wallet_address=notification.target_user_address,
             notification_id=notification.id,
             campaign_id=notification.campaign_id,
             voucher_detail=notification.voucher_detail,
+            condition=condition,
             status="wait_to_user",
             accepted_at=datetime.utcnow(),
         )
@@ -2340,6 +2407,7 @@ class UserVoucherResource(BaseModel):
     notification_id: str
     campaign_id: str
     voucher_detail: dict
+    condition: str | None = None
     status: str
     created_at: datetime
     accepted_at: datetime | None = None

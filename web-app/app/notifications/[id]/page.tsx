@@ -70,7 +70,7 @@ export default function NotificationDetailPage() {
 
         const data = await response.json()
         const found = data.notifications.find((n: Notification) => n.id === notificationId)
-        
+
         if (!found) {
           throw new Error("Notification not found")
         }
@@ -123,7 +123,7 @@ export default function NotificationDetailPage() {
 
       const updated = await response.json()
       setNotification(updated)
-      
+
       // Redirect to notifications list after a short delay
       setTimeout(() => {
         router.push("/notifications")
@@ -200,10 +200,11 @@ export default function NotificationDetailPage() {
 
   const voucherDetail = notification.voucher_detail || {}
   const imageUrl = (typeof voucherDetail.imageUrl === 'string' ? voucherDetail.imageUrl : null) ||
-                   (typeof voucherDetail.image_url === 'string' ? voucherDetail.image_url : null) ||
-                   undefined
+    (typeof voucherDetail.image_url === 'string' ? voucherDetail.image_url : null) ||
+    undefined
   const description = (typeof voucherDetail.description === 'string' ? voucherDetail.description : null) ||
-                      notification.content
+    notification.content
+  const tokenAmount = typeof voucherDetail.tokenAmount === 'number' ? voucherDetail.tokenAmount : undefined
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-purple-950 to-slate-950">
@@ -253,10 +254,11 @@ export default function NotificationDetailPage() {
 
         {/* Voucher Display */}
         <div className="mb-6">
-          <CouponVoucher 
+          <CouponVoucher
             couponDesign={{
               description: description,
               imageUrl: imageUrl,
+              tokenAmount: tokenAmount,
             }}
           />
 

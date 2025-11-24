@@ -6,6 +6,7 @@ import { useState, useEffect } from "react";
 interface CouponDesign {
   description: string;
   imageUrl?: string;
+  tokenAmount?: number;
 }
 
 interface CouponVoucherProps {
@@ -51,13 +52,20 @@ export function CouponVoucher({ couponDesign }: CouponVoucherProps) {
               <div key={i} className="w-1 h-1 bg-slate-400 rounded-full"></div>
             ))}
           </div>
-          
+
           {/* Header */}
           <div className="flex-shrink-0">
             <div className="inline-block px-2 py-0.5 bg-gradient-to-r from-cyan-500 to-purple-500 rounded-full mb-2">
               <span className="text-white font-bold text-xs uppercase tracking-wide">Special Offer</span>
             </div>
-            <h3 className="text-xl font-bold text-slate-800 mb-1">Coupon Voucher</h3>
+            <div className="flex items-center justify-between mb-1 mr-4">
+              <h3 className="text-xl font-bold text-slate-800">Coupon Voucher</h3>
+              {couponDesign.tokenAmount && (
+                <div className="inline-block px-3 py-1 bg-gradient-to-r from-yellow-400 to-orange-400 rounded-full shadow-lg">
+                  <span className="text-white font-bold text-sm">🎁 {couponDesign.tokenAmount} SYM</span>
+                </div>
+              )}
+            </div>
             <p className="text-xs text-slate-600 line-clamp-2">{couponDesign.description}</p>
           </div>
 
@@ -83,7 +91,7 @@ export function CouponVoucher({ couponDesign }: CouponVoucherProps) {
           <div className="absolute top-0 right-0 w-8 h-8 border-t-4 border-r-4 border-cyan-400 rounded-tr-lg z-10"></div>
           {/* Decorative corner on bottom-right */}
           <div className="absolute bottom-0 right-0 w-8 h-8 border-b-4 border-r-4 border-purple-400 rounded-br-lg z-10"></div>
-          
+
           {/* Image Container */}
           <div className="relative w-full h-full bg-white rounded-lg overflow-hidden shadow-lg border-2 border-cyan-200/50">
             {hasImage && (
@@ -107,7 +115,7 @@ export function CouponVoucher({ couponDesign }: CouponVoucherProps) {
                     target.style.display = 'none';
                   }
                 }}
-                style={{ 
+                style={{
                   display: imageError ? 'none' : 'block',
                   maxWidth: '100%',
                   maxHeight: '100%'

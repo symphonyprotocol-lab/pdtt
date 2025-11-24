@@ -29,6 +29,7 @@ interface AIResponse {
     description: string;
     imageUrl?: string;
     imagePrompt?: string;
+    tokenAmount?: number;
   };
   targetPersonCount?: number;
   targetWalletAddresses?: string[];
@@ -43,6 +44,7 @@ export default function CompanyUserPage() {
   const [budget, setBudget] = useState("");
   const [showResults, setShowResults] = useState(false);
   const [regeneratingImage, setRegeneratingImage] = useState(false);
+  const budgetForUserRate = 0.45;
 
   const walletAddress = useMemo(() => {
     const addr = account?.address as unknown;
@@ -91,11 +93,11 @@ export default function CompanyUserPage() {
     setLoading(true);
     setShowResults(false);
     setAiResponse(null);
-    
+
     try {
       const url = buildApiUrl("/campaign/analyze");
       console.log("Calling API:", url);
-      
+
       const response = await fetch(url, {
         method: "POST",
         headers: {
@@ -117,10 +119,10 @@ export default function CompanyUserPage() {
       }
 
       const data = await response.json();
-      
+
       // Parse the JSON response
       let imageUrl = data.couponDesign?.imageUrl || undefined;
-      
+
       // If imageUrl is a DALL-E URL, upload it to Pinata immediately so it's always available
       // (DALL-E URLs expire after ~2 hours, so we need to upload to Pinata for persistence)
       if (imageUrl && (imageUrl.includes("oaidalle") || imageUrl.includes("blob.core.windows.net"))) {
@@ -133,7 +135,7 @@ export default function CompanyUserPage() {
             },
             body: JSON.stringify({ imageUrl }),
           });
-          
+
           if (uploadResponse.ok) {
             const result = await uploadResponse.json();
             if (result.url) {
@@ -153,13 +155,13 @@ export default function CompanyUserPage() {
           // Keep DALL-E URL as fallback (may expire)
         }
       }
-      
+
       const parsedResponse: AIResponse = {
         targetGroup: data.targetGroup || "Target Group",
         userPortrait: {
           demographics: data.userPortrait?.demographics || "",
-          interests: Array.isArray(data.userPortrait?.interests) 
-            ? data.userPortrait.interests 
+          interests: Array.isArray(data.userPortrait?.interests)
+            ? data.userPortrait.interests
             : [],
           behavior: data.userPortrait?.behavior || "",
           usedModels: Array.isArray(data.userPortrait?.usedModels) && data.userPortrait.usedModels.length > 0
@@ -170,13 +172,14 @@ export default function CompanyUserPage() {
           description: data.couponDesign?.description || "",
           imageUrl: imageUrl,
           imagePrompt: data.couponDesign?.imagePrompt || undefined,
+          tokenAmount: data.couponDesign?.tokenAmount,
         },
         targetPersonCount: data.targetPersonCount || 0,
-        targetWalletAddresses: Array.isArray(data.targetWalletAddresses) 
-          ? data.targetWalletAddresses 
+        targetWalletAddresses: Array.isArray(data.targetWalletAddresses)
+          ? data.targetWalletAddresses
           : [],
       };
-      
+
       setAiResponse(parsedResponse);
       setShowResults(true);
       toast.success("AI analysis complete!");
@@ -286,22 +289,23 @@ export default function CompanyUserPage() {
       // Calculate token reward amount
       const targetPersonCount = aiResponse.targetPersonCount || 0;
       const tokenAmount = budgetAmount > 0 && targetPersonCount > 0
-        ? Math.round((budgetAmount * 0.3) / targetPersonCount)
-        : 20;
-      
+        ? Math.round((budgetAmount * budgetForUserRate) / targetPersonCount)
+        : 0;
+
       // Prepare coupon design - ensure Pinata URL is used and update description with token amount
-      const couponDesign = { 
+      const couponDesign = {
         ...aiResponse.couponDesign,
-        description: `${aiResponse.couponDesign.description} Each voucher rewards ${tokenAmount} SYM tokens upon successful redemption.`
+        description: `${aiResponse.couponDesign.description} Each voucher rewards ${tokenAmount} SYM tokens upon successful redemption.`,
+        tokenAmount: tokenAmount
       };
-      
+
       // If imageUrl is still a DALL-E URL (shouldn't happen if analysis upload worked, but handle it anyway)
       const imageUrl = couponDesign.imageUrl;
       if (imageUrl && (imageUrl.includes("oaidalle") || imageUrl.includes("blob.core.windows.net"))) {
         try {
           console.log("[CAMPAIGN_START] Uploading voucher image to Pinata...");
           toast.info("Uploading voucher image to Pinata...");
-          
+
           const uploadResponse = await fetch("/api/upload-image", {
             method: "POST",
             headers: {
@@ -309,7 +313,7 @@ export default function CompanyUserPage() {
             },
             body: JSON.stringify({ imageUrl }),
           });
-          
+
           if (uploadResponse.ok) {
             const result = await uploadResponse.json();
             if (result.url) {
@@ -367,13 +371,13 @@ export default function CompanyUserPage() {
 
       const data = await response.json();
       toast.success(`Campaign started successfully! Job ID: ${data.jobId || "N/A"}`);
-      
+
       // Reset form
       setQuery("");
       setBudget("");
       setAiResponse(null);
       setShowResults(false);
-      
+
       // Navigate to jobs page
       router.push("/jobs");
     } catch (error) {
@@ -385,7 +389,7 @@ export default function CompanyUserPage() {
 
   const handleSwitchRole = () => {
     if (!walletAddress) return;
-    
+
     const walletRoleMap = localStorage.getItem(WALLET_ROLE_MAP_KEY);
     let map: Record<string, string> = {};
     if (walletRoleMap) {
@@ -507,7 +511,7 @@ export default function CompanyUserPage() {
                           <p className="text-xs font-mono text-slate-300">
                             {aiResponse.targetWalletAddresses.slice(0, 5).map((address, idx) => {
                               // Truncate address: show first 6 chars and last 4 chars
-                              const truncated = address.length > 10 
+                              const truncated = address.length > 10
                                 ? `${address.substring(0, 6)}...${address.substring(address.length - 4)}`
                                 : address;
                               const addresses = aiResponse.targetWalletAddresses || [];
@@ -607,14 +611,14 @@ export default function CompanyUserPage() {
                           const budgetAmount = parseFloat(budget) || 0;
                           const targetPersonCount = aiResponse.targetPersonCount || 0;
                           const tokenAmount = budgetAmount > 0 && targetPersonCount > 0
-                            ? Math.round((budgetAmount * 0.3) / targetPersonCount)
-                            : 20;
+                            ? Math.round((budgetAmount * budgetForUserRate) / targetPersonCount)
+                            : 0;
                           return `${tokenAmount} SYM`;
                         })()}
                       </p>
                       <p className="text-xs text-slate-400 mt-2">
                         {budget && parseFloat(budget) > 0
-                          ? `30% of budget (${parseFloat(budget) * 0.3}) ÷ ${aiResponse.targetPersonCount || 0} people`
+                          ? ` ${budgetForUserRate * 100}% of budget (${parseFloat(budget) * budgetForUserRate}) ÷ ${aiResponse.targetPersonCount || 0} people`
                           : "Default reward amount"}
                       </p>
                     </div>
@@ -625,7 +629,7 @@ export default function CompanyUserPage() {
                         <Coins className="h-5 w-5 text-cyan-400" />
                         <span className="text-sm font-semibold text-cyan-400">Token Reward per Voucher</span>
                       </div>
-                      <p className="text-2xl font-bold text-white">20 SYM</p>
+                      <p className="text-2xl font-bold text-white">0 SYM</p>
                       <p className="text-xs text-slate-400 mt-2">Default reward amount (will update after budget is set)</p>
                     </div>
                   )}

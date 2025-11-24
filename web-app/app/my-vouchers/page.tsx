@@ -75,11 +75,11 @@ const getStatusBadge = (status: string) => {
 
 const formatDate = (dateString: string | null | undefined) => {
   if (!dateString) return ""
-  
+
   try {
     const date = new Date(dateString)
     if (isNaN(date.getTime())) return ""
-    
+
     return date.toLocaleString(undefined, {
       year: 'numeric',
       month: 'short',
@@ -126,6 +126,7 @@ export default function MyVouchersPage() {
 
         const data: UserVouchersResponse = await response.json()
         setVouchers(data.vouchers)
+        console.log(data.vouchers)
       } catch (err) {
         console.error("Error fetching vouchers:", err)
         setError(err instanceof Error ? err.message : "Failed to load vouchers")
@@ -207,6 +208,7 @@ export default function MyVouchersPage() {
               const statusBadge = getStatusBadge(voucher.status)
               const imageUrl = voucher.voucher_detail?.imageUrl || voucher.voucher_detail?.image_url
               const description = voucher.voucher_detail?.description || "No description available"
+              const tokenAmount = voucher.voucher_detail?.tokenAmount || 0
 
               return (
                 <Card
@@ -232,6 +234,7 @@ export default function MyVouchersPage() {
                       couponDesign={{
                         description: description,
                         imageUrl: imageUrl,
+                        tokenAmount: tokenAmount,
                       }}
                     />
 

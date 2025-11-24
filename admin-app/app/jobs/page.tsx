@@ -18,6 +18,14 @@ import { Building2, LogOut, ArrowRight, Users, Coins, CheckCircle, Clock, XCircl
 import { toast } from "sonner";
 import Link from "next/link";
 import { CouponVoucher } from "@/components/coupon-voucher";
+import { MerkleTree } from "merkletreejs";
+import { sha3_256 } from "js-sha3";
+import { Buffer } from "buffer";
+
+const MODULE_ADDRESS = process.env.NEXT_PUBLIC_MODULE_ADDRESS || "0x100";
+// Calculate token metadata address: sha3_256(creator_address + "SYM" + 0xFE)
+// For 0x100, we can calculate it dynamically or use a fixed value if creator is fixed.
+// Here we'll calculate it dynamically assuming creator is MODULE_ADDRESS.
 
 const WALLET_ROLE_MAP_KEY = "wallet_role_map";
 
@@ -40,11 +48,12 @@ interface Job {
   couponDesign?: {
     description: string;
     imageUrl?: string;
+    tokenAmount?: number;
   };
 }
 
 export default function JobsPage() {
-  const { account, connected, disconnect } = useWallet();
+  const { account, connected, disconnect, signAndSubmitTransaction } = useWallet();
   const router = useRouter();
   const [jobs, setJobs] = useState<Job[]>([]);
   const [loading, setLoading] = useState(true);
@@ -74,16 +83,16 @@ export default function JobsPage() {
 
     setLoading(true);
     setBackendError(null);
-    
+
     try {
       const API_BASE = (process.env.NEXT_PUBLIC_BACKEND_URL && process.env.NEXT_PUBLIC_BACKEND_URL.replace(/\/$/, "")) || "http://localhost:8000";
       const url = `${API_BASE}/api/campaigns/${walletAddress}`;
       console.log("Calling API:", url);
-      
+
       // Create abort controller for timeout
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
-      
+
       let response: Response;
       try {
         response = await fetch(url, {
@@ -98,7 +107,7 @@ export default function JobsPage() {
         clearTimeout(timeoutId);
         // Handle network errors (CORS, connection refused, timeout, etc.)
         console.error("Fetch error:", fetchError);
-        
+
         const error = fetchError as { name?: string; message?: string };
         let errorMsg = "";
         if (error.name === "AbortError") {
@@ -108,11 +117,11 @@ export default function JobsPage() {
         } else {
           errorMsg = `Network error: ${error.message || "Unknown error"}`;
         }
-        
+
         setBackendError(errorMsg);
         throw new Error(errorMsg);
       }
-      
+
       if (!response.ok) {
         const errorText = await response.text().catch(() => "Unknown error");
         // Check if it's an HTML error page (404 from Next.js)
@@ -127,7 +136,7 @@ export default function JobsPage() {
       }
 
       const data = await response.json();
-      
+
       // Map API response to Job format
       const mappedJobs: Job[] = (data.campaigns || []).map((campaign: {
         id: string;
@@ -162,20 +171,20 @@ export default function JobsPage() {
         couponUsed: campaign.couponUsed || 0,
         couponDesign: campaign.couponDesign,
       }));
-      
+
       setJobs(mappedJobs);
       setBackendError(null); // Clear error on success
     } catch (error) {
       console.error("Error loading jobs:", error);
       const errorMessage = error instanceof Error ? error.message : "Failed to load campaigns";
-      
+
       // Only show toast if we don't have a backend error (to avoid duplicate messages)
       if (!backendError) {
         toast.error(errorMessage, {
           duration: 5000,
         });
       }
-      
+
       // Set empty jobs on error to prevent UI issues
       setJobs([]);
     } finally {
@@ -201,32 +210,143 @@ export default function JobsPage() {
   };
 
   const handleCampaignAction = async (jobId: string, action: "start" | "stop") => {
-    try {
-      const API_BASE = (process.env.NEXT_PUBLIC_BACKEND_URL && process.env.NEXT_PUBLIC_BACKEND_URL.replace(/\/$/, "")) || "http://localhost:8000";
-      const url = `${API_BASE}/api/campaigns/${jobId}/action`;
-      
-      const response = await fetch(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ action }),
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(errorText || `HTTP error! status: ${response.status}`);
+    if (action === "start") {
+      if (!walletAddress) {
+        toast.error("Please connect your wallet to start the campaign");
+        return;
       }
 
-      await response.json();
-      toast.success(`Campaign ${action === "start" ? "started" : "stopped"} successfully!`);
-      
-      // Reload jobs to get updated status
-      loadJobs();
-    } catch (error) {
-      console.error(`Error ${action}ing campaign:`, error);
-      const errorMessage = error instanceof Error ? error.message : `Failed to ${action} campaign`;
-      toast.error(errorMessage);
+      try {
+        const API_BASE = (process.env.NEXT_PUBLIC_BACKEND_URL && process.env.NEXT_PUBLIC_BACKEND_URL.replace(/\/$/, "")) || "http://localhost:8000";
+
+        // 1. Fetch campaign details to get target wallet addresses
+        const campaignResponse = await fetch(`${API_BASE}/api/campaigns/detail/${jobId}`);
+        console.log("Campaign response:", campaignResponse);
+        let targetAddresses: string[] = [];
+        let budget = 0;
+
+        if (campaignResponse.ok) {
+          const campaignData = await campaignResponse.json();
+          console.log("Campaign data:", campaignData);
+          targetAddresses = campaignData.targetWalletAddresses || [];
+          budget = campaignData.budget || 0;
+        } else {
+          // Fallback: try to find in current jobs list if detail API fails
+          const job = jobs.find(j => j.id === jobId);
+          if (job) {
+            budget = job.budget;
+          }
+          if (targetAddresses.length === 0) {
+            console.warn("Could not fetch target addresses, using empty list");
+          }
+        }
+
+        if (targetAddresses.length === 0) {
+          toast.error("No target addresses found for this campaign. Cannot generate Merkle Tree.");
+          return;
+        }
+
+        // 2. Generate Merkle Tree
+        const leaves = targetAddresses.map((addr: string) => {
+          // Remove 0x prefix if present
+          const cleanAddr = addr.startsWith("0x") ? addr.slice(2) : addr;
+          // Convert to bytes
+          const addrBytes = Buffer.from(cleanAddr, "hex");
+          // Hash using SHA3-256
+          return Buffer.from(sha3_256(addrBytes), "hex");
+        });
+
+        const tree = new MerkleTree(leaves, (data: Buffer) => Buffer.from(sha3_256(data), "hex"), { sortPairs: true });
+        const root = tree.getRoot(); // Buffer
+        const rootHash = Array.from(root); // Convert to number[] for Move vector<u8>
+
+        // 3. Submit Transaction
+        // Calculate token metadata address
+        // creator (MODULE_ADDRESS) + "SYM" + 0xFE
+        const creatorAddr = MODULE_ADDRESS.startsWith("0x") ? MODULE_ADDRESS.slice(2) : MODULE_ADDRESS;
+        const seed = "SYM";
+        const seedBytes = Buffer.from(seed, "utf-8");
+        const creatorBytes = Buffer.from(creatorAddr, "hex");
+
+        const buffer = Buffer.concat([
+          creatorBytes,
+          seedBytes,
+          Buffer.from([0xFE])
+        ]);
+        const metadataAddrBytes = Buffer.from(sha3_256(buffer), "hex");
+        const metadataAddr = "0x" + metadataAddrBytes.toString("hex");
+
+        // Calculate total amount (100% of budget)
+        const totalAmount = Math.floor(budget * 100000000); // Assuming 8 decimals
+
+        const transaction = {
+          data: {
+            function: `${MODULE_ADDRESS}::ad_rewards::create_ad`,
+            functionArguments: [
+              Array.from(Buffer.from(jobId)), // ad_id: vector<u8>
+              metadataAddr, // token_metadata: Object<Metadata>
+              totalAmount, // total_amount
+              rootHash, // merkle_root: vector<u8>
+              targetAddresses.length // user_count: u64
+            ],
+          },
+        };
+
+        console.log("Submitting transaction with params:", {
+          ad_id: jobId,
+          metadata: metadataAddr,
+          amount: totalAmount,
+          root: Buffer.from(rootHash).toString('hex'),
+          count: targetAddresses.length
+        });
+
+        const response = await signAndSubmitTransaction(transaction as any);
+        toast.success("Transaction submitted! Waiting for confirmation...");
+
+        // 4. Update Backend
+        const actionUrl = `${API_BASE}/api/campaigns/${jobId}/action`;
+        await fetch(actionUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "start", txHash: response.hash }),
+        });
+
+        toast.success("Campaign started successfully!");
+        loadJobs();
+
+      } catch (error) {
+        console.error("Error starting campaign:", error);
+        toast.error("Failed to start campaign: " + (error instanceof Error ? error.message : String(error)));
+      }
+    } else {
+      // Stop action
+      try {
+        const API_BASE = (process.env.NEXT_PUBLIC_BACKEND_URL && process.env.NEXT_PUBLIC_BACKEND_URL.replace(/\/$/, "")) || "http://localhost:8000";
+        const url = `${API_BASE}/api/campaigns/${jobId}/action`;
+
+        const response = await fetch(url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ action }),
+        });
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(errorText || `HTTP error! status: ${response.status}`);
+        }
+
+        await response.json();
+        toast.success(`Campaign stopped successfully!`);
+
+        // Reload jobs to get updated status
+        loadJobs();
+      } catch (error) {
+        console.error(`Error stopping campaign:`, error);
+        const errorMessage = error instanceof Error ? error.message : `Failed to stop campaign`;
+        toast.error(errorMessage);
+      }
     }
   };
 
@@ -242,7 +362,7 @@ export default function JobsPage() {
     try {
       const API_BASE = (process.env.NEXT_PUBLIC_BACKEND_URL && process.env.NEXT_PUBLIC_BACKEND_URL.replace(/\/$/, "")) || "http://localhost:8000";
       const url = `${API_BASE}/api/campaigns/${campaignToDelete.id}`;
-      
+
       const response = await fetch(url, {
         method: "DELETE",
         headers: {
@@ -259,7 +379,7 @@ export default function JobsPage() {
       toast.success("Campaign deleted successfully!");
       setShowDeleteDialog(false);
       setCampaignToDelete(null);
-      
+
       // Reload jobs to get updated list
       loadJobs();
     } catch (error) {

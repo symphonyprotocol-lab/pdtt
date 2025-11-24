@@ -44,11 +44,18 @@ export default function LoginPage() {
             navigateToRole(storedRole);
             return;
           }
+          // If map exists but no role for this wallet, STOP here.
+          // Do NOT fall back to legacyRole, as it might belong to a different wallet
+          // and cause a redirect loop.
+          setShowRoleSelector(true);
+          return;
         } catch (e) {
           console.error("Error parsing wallet role map:", e);
         }
       }
-      // Check legacy storage
+
+      // Only check legacy storage if walletRoleMap is completely missing
+      // This maintains backward compatibility for old sessions without causing loops
       const legacyRole = localStorage.getItem(ROLE_STORAGE_KEY) as UserRole;
       if (legacyRole && (legacyRole === "model_supplier" || legacyRole === "company_user")) {
         setSelectedRole(legacyRole);
@@ -73,9 +80,9 @@ export default function LoginPage() {
 
   const handleRoleSelect = (role: UserRole) => {
     if (!walletAddress) return;
-    
+
     setSelectedRole(role);
-    
+
     // Store role mapping for this wallet
     const walletRoleMap = localStorage.getItem(WALLET_ROLE_MAP_KEY);
     let map: Record<string, UserRole> = {};
@@ -88,10 +95,10 @@ export default function LoginPage() {
     }
     map[walletAddress] = role;
     localStorage.setItem(WALLET_ROLE_MAP_KEY, JSON.stringify(map));
-    
+
     // Also store legacy key for backward compatibility
     localStorage.setItem(ROLE_STORAGE_KEY, role || "");
-    
+
     navigateToRole(role);
   };
 
