@@ -208,11 +208,34 @@ module pdtt::ad_rewards {
         compare_vectors_internal(a, b, idx + 1)
     }
 
-    /// 合并哈希，使用 sha3_256
+    /// 比较两个向量的大小 (a < b)
+    fun lt(a: &vector<u8>, b: &vector<u8>): bool {
+        let len_a = vector::length(a);
+        let len_b = vector::length(b);
+        let len = if (len_a < len_b) len_a else len_b;
+
+        let i = 0;
+        while (i < len) {
+            let val_a = *vector::borrow(a, i);
+            let val_b = *vector::borrow(b, i);
+            if (val_a < val_b) return true;
+            if (val_a > val_b) return false;
+            i = i + 1;
+        };
+
+        len_a < len_b
+    }
+
+    /// 合并哈希，使用 sha3_256 (支持 sorted pairs)
     fun hash_combine(a: vector<u8>, b: vector<u8>): vector<u8> {
         let combined = vector::empty<u8>();
-        vector::append(&mut combined, a);
-        vector::append(&mut combined, b);
+        if (lt(&a, &b)) {
+            vector::append(&mut combined, a);
+            vector::append(&mut combined, b);
+        } else {
+            vector::append(&mut combined, b);
+            vector::append(&mut combined, a);
+        };
         hash::sha3_256(combined)
     }
 

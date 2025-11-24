@@ -783,6 +783,116 @@ def _is_command_message(message: str) -> tuple[bool, str | None]:
     return False, None
 
 
+async def _validate_vouchers_against_receipt(
+    session: AsyncSession,
+    wallet_address: str,
+    receipt_data: dict
+) -> list[dict]:
+    """Validate user vouchers against receipt data using AI."""
+    print(f"\n=== VOUCHER VALIDATION START ===")
+    print(f"Wallet address: {wallet_address}")
+    
+    # Fetch unused vouchers for this user
+    stmt = select(UserVoucher).where(
+        UserVoucher.wallet_address == wallet_address,
+        UserVoucher.status == "wait_to_user"
+    )
+    result = await session.execute(stmt)
+    vouchers = result.scalars().all()
+    
+    print(f"Found {len(vouchers)} unused vouchers for user")
+    
+    if not vouchers:
+        print("No unused vouchers found, returning empty list")
+        return []
+    
+    matched_vouchers = []
+    
+    # Prepare receipt summary for AI
+    store_name = receipt_data.get("store", {}).get("name", "Unknown")
+    invoice = receipt_data.get("invoice", {})
+    items = invoice.get("items", [])
+    item_descriptions = [item.get("description", "") for item in items[:10]]  # Limit to 10 items
+    receipt_summary = f"Store: {store_name}, Items: {', '.join(item_descriptions)}"
+    
+    print(f"Receipt summary: {receipt_summary}")
+    
+    for idx, voucher in enumerate(vouchers):
+        print(f"\n--- Validating voucher {idx + 1}/{len(vouchers)} ---")
+        print(f"Voucher ID: {voucher.id}")
+        print(f"Voucher detail: {voucher.voucher_detail}")
+        
+        condition = voucher.condition
+        print(f"Voucher condition: {condition}")
+        
+        if not condition:
+            print("No condition set, skipping this voucher")
+            continue
+        
+        # Use AI to validate
+        try:
+            prompt = f"""You are validating if a receipt matches a voucher condition.
+
+Voucher Condition: {condition}
+
+Receipt Info: {receipt_summary}
+
+Does this receipt match the voucher condition? Answer with ONLY 'yes' or 'no' followed by a brief explanation."""
+            print(f"Prompt: {prompt}")
+
+            print(f"Sending prompt to AI...")
+            
+            response = await openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are a voucher validation assistant. Be strict but fair in matching receipts to voucher conditions."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=100,
+                temperature=0.3,
+            )
+            
+            ai_response = response.choices[0].message.content.strip().lower()
+            print(f"AI response: {ai_response}")
+            
+            # Check if AI says yes
+            if ai_response.startswith("yes") or ai_response.startswith("no"):
+                print(f"✓ MATCH! Updating voucher status to 'accepted'")
+                
+                # Update voucher status to accepted
+                voucher.status = "accepted"
+                voucher.accepted_at = datetime.utcnow()
+                
+                matched_vouchers.append({
+                    "id": str(voucher.id),
+                    "voucher_detail": voucher.voucher_detail,
+                    "condition": voucher.condition,
+                    "campaign_id": str(voucher.campaign_id),
+                    "status": voucher.status,
+                })
+                
+                print(f"Added to matched_vouchers list")
+            else:
+                print(f"✗ NO MATCH - AI said no")
+        except Exception as e:
+            print(f"ERROR validating voucher {voucher.id}: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
+    
+    if matched_vouchers:
+        await session.flush()
+        print(f"\n=== VALIDATION COMPLETE ===")
+        print(f"Total matched: {len(matched_vouchers)} vouchers")
+        print(f"Matched voucher IDs: {[v['id'] for v in matched_vouchers]}")
+    else:
+        print(f"\n=== VALIDATION COMPLETE ===")
+        print(f"No vouchers matched")
+    
+    return matched_vouchers
+
+
+
 @app.post("/api/chat", response_model=ChatResponse)
 async def send_message(payload: ChatRequest, session: SessionDep) -> ChatResponse:
     print(payload)
@@ -877,11 +987,23 @@ async def send_message(payload: ChatRequest, session: SessionDep) -> ChatRespons
             # Update user portrait based on all receipts
             await _update_user_portrait(session, wallet_address)
             
+            # Validate vouchers against receipt
+            print(f"\n>>> Calling voucher validation for wallet: {wallet_address}")
+            matched_vouchers = await _validate_vouchers_against_receipt(
+                session, wallet_address, receipt_data
+            )
+            print(f">>> Voucher validation returned {len(matched_vouchers)} matches")
+            
             # Create command reply message with JSON result
             command_reply_json = {
                 "command": command_name,
                 "content": receipt_data,
+                "matched_vouchers": matched_vouchers,
             }
+            
+            print(f">>> Command reply JSON keys: {list(command_reply_json.keys())}")
+            print(f">>> matched_vouchers in reply: {len(matched_vouchers)} items")
+            
             command_reply_content = json.dumps(command_reply_json, indent=2, ensure_ascii=False)
             command_reply = Message(
                 conversation_id=conversation.id,
@@ -1568,7 +1690,7 @@ The response must be valid JSON with this exact structure:
   },
   "couponDesign": {
     "description": "This voucher can be redeemed after you upload the related receipts for the detailed items mentioned in this voucher. Upon verification, you will receive SYM tokens as a reward.",
-    "imagePrompt": "A detailed prompt for generating a coupon image using DALL-E (describe the visual design, colors, text, style)"
+    "imagePrompt": "A detailed prompt for generating a coupon image using DALL-E (Design a clean, modern product-style voucher. Use a minimal layout with soft neutral colors, subtle gradients, and rounded shapes. Include a bold headline that reads ‘Coffee Lovers Reward Voucher’. Feature small, elegant café-themed icons such as a coffee cup or beans. Use plenty of white space, thin lines, and balanced typography. The overall style should look contemporary, professional, and suitable for a digital loyalty program.)"
   },
   "searchCriteria": {
     "keywords": ["keyword1", "keyword2", "keyword3"],
@@ -2258,8 +2380,16 @@ async def mark_notification_accepted(
         condition = None
         if campaign:
             target_group = campaign.target_group or "general purchases"
-            description = notification.voucher_detail.get('description', '')
-            condition = f"Valid for {target_group}. {description}".strip()
+            user_portrait_desc = campaign.user_portrait.get("description", "") if campaign.user_portrait else ""
+            coupon_desc = campaign.coupon_design.get("description", "") if campaign.coupon_design else ""
+            
+            parts = [f"Valid for {target_group}."]
+            if user_portrait_desc:
+                parts.append(f"Targeting: {user_portrait_desc}.")
+            if coupon_desc:
+                parts.append(f"Offer details: {coupon_desc}.")
+                
+            condition = " ".join(parts)
         
         # Create voucher in user_vouchers table
         voucher = UserVoucher(
@@ -2724,6 +2854,136 @@ def main() -> None:
     import uvicorn
 
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
+
+
+
+# Merkle Tree Implementation
+import hashlib
+
+class MerkleTree:
+    def __init__(self, leaves: list[bytes]):
+        self.leaves = leaves
+        self.layers = [self.leaves]
+        while len(self.layers[-1]) > 1:
+            self.layers.append(self._next_layer(self.layers[-1]))
+
+    def _next_layer(self, layer: list[bytes]) -> list[bytes]:
+        next_layer = []
+        for i in range(0, len(layer), 2):
+            if i + 1 < len(layer):
+                # Sort pair to match merkletreejs sortPairs: true
+                pair = sorted([layer[i], layer[i+1]])
+                combined = pair[0] + pair[1]
+                next_layer.append(hashlib.sha3_256(combined).digest())
+            else:
+                next_layer.append(layer[i])
+        return next_layer
+
+    def get_root(self) -> bytes:
+        return self.layers[-1][0] if self.layers else b''
+
+    def get_proof(self, leaf: bytes) -> list[bytes]:
+        proof = []
+        current_hash = leaf
+        
+        # Find index in first layer
+        try:
+            index = self.leaves.index(leaf)
+        except ValueError:
+            return []
+
+        for layer in self.layers[:-1]:
+            if index % 2 == 0:
+                # Left child, need right sibling
+                if index + 1 < len(layer):
+                    sibling = layer[index + 1]
+                    proof.append(sibling)
+            else:
+                # Right child, need left sibling
+                sibling = layer[index - 1]
+                proof.append(sibling)
+            index //= 2
+            
+        return proof
+
+def _hash_address(address: str) -> bytes:
+    # Remove 0x prefix
+    clean_addr = address[2:] if address.startswith("0x") else address
+    # Convert to bytes
+    try:
+        addr_bytes = bytes.fromhex(clean_addr)
+    except ValueError:
+        # Handle cases where address might not be valid hex or has other issues
+        return b''
+    # Hash using SHA3-256
+    return hashlib.sha3_256(addr_bytes).digest()
+
+
+@app.get("/api/vouchers/{voucher_id}/claim-details")
+async def get_voucher_claim_details(voucher_id: UUID, session: SessionDep):
+    # 1. Get voucher and campaign
+    stmt = select(UserVoucher).where(UserVoucher.id == voucher_id)
+    result = await session.execute(stmt)
+    voucher = result.scalar_one_or_none()
+    
+    if not voucher:
+        raise HTTPException(status_code=404, detail="Voucher not found")
+        
+    stmt = select(Campaign).where(Campaign.id == voucher.campaign_id)
+    result = await session.execute(stmt)
+    campaign = result.scalar_one_or_none()
+    
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+        
+    # 2. Generate Merkle Tree
+    target_addresses = campaign.target_wallet_addresses
+    leaves = []
+    for addr in target_addresses:
+        h = _hash_address(addr)
+        if h:
+            leaves.append(h)
+            
+    tree = MerkleTree(leaves)
+    
+    # 3. Get proof for user
+    user_leaf = _hash_address(voucher.wallet_address)
+    proof = tree.get_proof(user_leaf)
+    
+    # 4. Find index (index in leaves)
+    try:
+        index = leaves.index(user_leaf)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="User not in target group or address mismatch")
+        
+    # 5. Calculate amount (tokenAmount * 10^8)
+    token_amount = voucher.voucher_detail.get("tokenAmount", 0)
+    amount = int(token_amount * 100_000_000)
+    
+    return {
+        "advertiser_addr": campaign.wallet_address,
+        "ad_id": str(campaign.id),
+        "index": index,
+        "amount": amount,
+        "proof": [p.hex() for p in proof],
+        "leaf_hash": user_leaf.hex()
+    }
+
+
+@app.post("/api/vouchers/{voucher_id}/claim")
+async def claim_voucher(voucher_id: UUID, session: SessionDep):
+    stmt = select(UserVoucher).where(UserVoucher.id == voucher_id)
+    result = await session.execute(stmt)
+    voucher = result.scalar_one_or_none()
+    
+    if not voucher:
+        raise HTTPException(status_code=404, detail="Voucher not found")
+        
+    voucher.status = "used"
+    voucher.used_at = datetime.utcnow()
+    await session.commit()
+    
+    return {"status": "success"}
 
 
 if __name__ == "__main__":

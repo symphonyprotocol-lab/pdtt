@@ -11,6 +11,7 @@ import { WalletSelector } from "@/components/wallet-selector"
 import { useWallet } from "@aptos-labs/wallet-adapter-react"
 import { ReceiptViewer } from "@/components/receipt-viewer"
 import { NotificationIcon } from "@/components/notification-icon"
+import { BalanceDisplay } from "@/components/balance-display"
 import Link from "next/link"
 
 const API_BASE =
@@ -67,9 +68,39 @@ export function Chatbot() {
 
   const canChat = connected && !!walletAddress
 
+  const [usedVoucherIds, setUsedVoucherIds] = useState<Set<string>>(new Set())
+
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
   }, [messages])
+
+  // Fetch user vouchers to track used status
+  useEffect(() => {
+    if (!walletAddress) return
+
+    const fetchVouchers = async () => {
+      try {
+        const response = await fetch(buildApiUrl(`/user-vouchers/${walletAddress}`))
+        if (response.ok) {
+          const data = await response.json()
+          const used = new Set<string>()
+          data.vouchers.forEach((v: any) => {
+            if (v.status === "used") {
+              used.add(v.id)
+            }
+          })
+          setUsedVoucherIds(used)
+        }
+      } catch (error) {
+        console.error("Error fetching vouchers:", error)
+      }
+    }
+
+    fetchVouchers()
+    // Poll every 10 seconds to keep status fresh
+    const interval = setInterval(fetchVouchers, 10000)
+    return () => clearInterval(interval)
+  }, [walletAddress])
 
   const handleImageSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
@@ -306,6 +337,7 @@ export function Chatbot() {
               </h1>
             </div>
             <div className="flex items-center gap-3">
+
               <NotificationIcon />
               <WalletSelector />
               {canChat && messages.length > 0 && (
@@ -366,33 +398,51 @@ export function Chatbot() {
             const isReceiptMessage =
               message.originalRole === "command_reply" &&
               (message.content.startsWith("{") || message.content.startsWith('{"command"'))
-            
+
             let receiptData = null
             let receiptImageUrl = message.imageUrl
+            let matchedVouchers = null
 
             if (isReceiptMessage) {
               try {
                 const parsed = JSON.parse(message.content)
+                console.log("📝 Parsed receipt message:", parsed)
+                console.log("📝 Command:", parsed.command)
+                console.log("📝 Has matched_vouchers?", "matched_vouchers" in parsed)
+
                 if (parsed.command === "SendReceipt" && parsed.content) {
                   receiptData = parsed.content
+                  matchedVouchers = parsed.matched_vouchers || null
+
+                  console.log("🎫 Matched vouchers:", matchedVouchers)
+                  console.log("🎫 Number of matched vouchers:", matchedVouchers ? matchedVouchers.length : 0)
+
                   // Get image URL from receipt meta if available
                   if (receiptData.meta?.source_image) {
                     receiptImageUrl = receiptData.meta.source_image
                   }
                 }
-              } catch {
+              } catch (e) {
+                console.error("❌ Error parsing receipt message:", e)
                 // Not valid JSON, fall through to normal rendering
               }
             }
 
             // Render receipt component if it's a receipt message
             if (receiptData) {
+              console.log("✅ Rendering ReceiptViewer with matched vouchers:", matchedVouchers)
+
               return (
                 <div
                   key={message.id}
                   className="flex justify-start mt-4"
                 >
-                  <ReceiptViewer receiptData={receiptData} imageUrl={receiptImageUrl} />
+                  <ReceiptViewer
+                    receiptData={receiptData}
+                    imageUrl={receiptImageUrl}
+                    matchedVouchers={matchedVouchers}
+                    usedVoucherIds={usedVoucherIds}
+                  />
                 </div>
               )
             }
@@ -401,16 +451,14 @@ export function Chatbot() {
             return (
               <div
                 key={message.id}
-                className={`flex ${
-                  message.role === "user" ? "justify-end" : "justify-start"
-                }`}
+                className={`flex ${message.role === "user" ? "justify-end" : "justify-start"
+                  }`}
               >
                 <Card
-                  className={`max-w-[80%] mt-4 ${
-                    message.role === "user"
-                      ? "bg-gradient-to-br from-cyan-500/20 to-blue-500/20 border-cyan-400/30"
-                      : "bg-slate-800/50 border-slate-700/50"
-                  } backdrop-blur-sm`}
+                  className={`max-w-[80%] mt-4 ${message.role === "user"
+                    ? "bg-gradient-to-br from-cyan-500/20 to-blue-500/20 border-cyan-400/30"
+                    : "bg-slate-800/50 border-slate-700/50"
+                    } backdrop-blur-sm`}
                 >
                   <div className="p-4">
                     {message.imageUrl && (
@@ -482,13 +530,13 @@ export function Chatbot() {
               Connect your wallet to enable the AI chat.
             </p>
           )}
-        {uploadingImage && (
-          <div className="pb-4 flex items-center gap-2 text-sm text-cyan-400">
-            <Loader2 className="h-4 w-4 animate-spin" />
-            <span>Uploading image...</span>
-          </div>
-        )}
-        {canChat && !isLoading && !uploadingImage && inputFocused && !input.trim().length && (
+          {uploadingImage && (
+            <div className="pb-4 flex items-center gap-2 text-sm text-cyan-400">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              <span>Uploading image...</span>
+            </div>
+          )}
+          {canChat && !isLoading && !uploadingImage && inputFocused && !input.trim().length && (
             <div className="pb-4 flex gap-3 text-sm text-slate-200">
               <Button
                 variant="outline"
@@ -563,7 +611,7 @@ export function Chatbot() {
               <Send className="h-4 w-4" />
             </Button>
           </div>
-          
+
         </div>
       </div>
     </div>
