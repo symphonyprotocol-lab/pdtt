@@ -109,7 +109,7 @@ export function VisionSection() {
               <Button 
                 size="lg" 
                 variant="outline" 
-                className="text-lg px-8 py-6 border-slate-600 text-white hover:bg-slate-700"
+                className="text-lg px-8 py-6 bg-transparent border-white/50 text-white hover:bg-white/10 hover:border-white/70 hover:text-white"
               >
                 Contact Us
               </Button>
