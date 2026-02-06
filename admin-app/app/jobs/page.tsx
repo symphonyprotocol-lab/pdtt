@@ -50,6 +50,8 @@ interface Job {
     imageUrl?: string;
     tokenAmount?: number;
   };
+  targetStore?: string | null;
+  targetItem?: string | null;
 }
 
 export default function JobsPage() {
@@ -155,6 +157,8 @@ export default function JobsPage() {
           description: string;
           imageUrl?: string;
         };
+        targetStore?: string;
+        targetItem?: string;
       }) => ({
         id: campaign.id,
         name: campaign.query.substring(0, 50) + (campaign.query.length > 50 ? "..." : ""),
@@ -170,6 +174,8 @@ export default function JobsPage() {
         couponSent: campaign.couponSent || 0,
         couponUsed: campaign.couponUsed || 0,
         couponDesign: campaign.couponDesign,
+        targetStore: campaign.targetStore,
+        targetItem: campaign.targetItem,
       }));
 
       setJobs(mappedJobs);
@@ -655,7 +661,11 @@ export default function JobsPage() {
                         </button>
                         {expandedCouponJobId === job.id && (
                           <div className="mt-4 max-w-2xl rounded-lg overflow-hidden">
-                            <CouponVoucher couponDesign={job.couponDesign} />
+                            <CouponVoucher couponDesign={{
+                              ...job.couponDesign,
+                              targetStore: job.targetStore,
+                              targetItem: job.targetItem
+                            }} />
                           </div>
                         )}
                       </div>

@@ -122,12 +122,39 @@ export function Chatbot() {
 
       const imageUrl = await response.json()
       console.log("Uploaded image URL:", imageUrl)
-      setSelectedImage(imageUrl)
+      setUploadingImage(false)
 
       // Automatically send SendReceipt command
       if (canChat && walletAddress) {
-        setIsLoading(true)
         setChatError(null)
+        
+        // Clear image preview immediately after successful upload
+        setSelectedImage(null)
+        
+        // Step 1: Add user message immediately
+        const userMessageId = `temp-user-${Date.now()}`
+        const userMessage: Message = {
+          id: userMessageId,
+          role: "user",
+          originalRole: "command",
+          content: "/SendReceipt",
+          imageUrl: imageUrl,
+          timestamp: new Date(),
+        }
+        setMessages((prev) => [...prev, userMessage])
+
+        // Step 2: Add thinking assistant message with animated content
+        const thinkingMessageId = `temp-thinking-${Date.now()}`
+        const thinkingMessage: Message = {
+          id: thinkingMessageId,
+          role: "assistant",
+          originalRole: "assistant",
+          content: "thinking", // Special marker for animated thinking message
+          timestamp: new Date(),
+        }
+        setMessages((prev) => [...prev, thinkingMessage])
+
+        // Don't set isLoading since we're already showing thinking message in the array
         try {
           const commandResponse = await fetch(buildApiUrl("/chat"), {
             method: "POST",
@@ -146,8 +173,12 @@ export function Chatbot() {
           }
 
           const data: ApiChatResponse = await commandResponse.json()
-          setMessages(mapApiMessages(data.messages ?? []))
-          setSelectedImage(null) // Clear selected image after sending
+          const apiMessages = mapApiMessages(data.messages ?? [])
+          
+          // Step 3: Replace all messages with API response (API returns full conversation)
+          // This ensures consistency and avoids duplicates
+          setMessages(apiMessages)
+          
           // Reset file input after successful send
           if (fileInputRef.current) {
             fileInputRef.current.value = ""
@@ -155,8 +186,8 @@ export function Chatbot() {
         } catch (error) {
           console.error("Error sending receipt command:", error)
           setChatError("Failed to process receipt. Please try again.")
-        } finally {
-          setIsLoading(false)
+          // Remove thinking message on error
+          setMessages((prev) => prev.filter((msg) => msg.id !== thinkingMessageId))
         }
       }
     } catch (error) {
@@ -448,6 +479,9 @@ export function Chatbot() {
             }
 
             // Normal message rendering
+            // Check if this is a thinking message (special animated version)
+            const isThinkingMessage = message.content === "thinking" && message.role === "assistant"
+            
             return (
               <div
                 key={message.id}
@@ -472,10 +506,19 @@ export function Chatbot() {
                         />
                       </div>
                     )}
-                    <p className="text-slate-100 whitespace-pre-wrap">{message.content}</p>
-                    <p className="mt-2 text-xs text-slate-400">
-                      {message.timestamp.toLocaleTimeString()}
-                    </p>
+                    {isThinkingMessage ? (
+                      <div className="flex items-center gap-2">
+                        <Loader2 className="h-4 w-4 animate-spin text-cyan-400" />
+                        <span className="text-slate-400 animate-pulse">Thinking...</span>
+                      </div>
+                    ) : (
+                      <p className="text-slate-100 whitespace-pre-wrap">{message.content}</p>
+                    )}
+                    {!isThinkingMessage && (
+                      <p className="mt-2 text-xs text-slate-400">
+                        {message.timestamp.toLocaleTimeString()}
+                      </p>
+                    )}
                   </div>
                 </Card>
               </div>
@@ -533,7 +576,7 @@ export function Chatbot() {
           {uploadingImage && (
             <div className="pb-4 flex items-center gap-2 text-sm text-cyan-400">
               <Loader2 className="h-4 w-4 animate-spin" />
-              <span>Uploading image...</span>
+              <span>Decoding image...</span>
             </div>
           )}
           {canChat && !isLoading && !uploadingImage && inputFocused && !input.trim().length && (

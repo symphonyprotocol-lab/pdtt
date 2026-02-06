@@ -21,6 +21,7 @@ interface Model {
   rank: number;
   usedTimes: number;
   rewardTokens: number;
+  githubRepo?: string | null;
 }
 
 export default function ModelSupplierPage() {
@@ -51,7 +52,7 @@ export default function ModelSupplierPage() {
       const API_BASE = (process.env.NEXT_PUBLIC_BACKEND_URL && process.env.NEXT_PUBLIC_BACKEND_URL.replace(/\/$/, "")) || "http://localhost:8000";
       const url = `${API_BASE}/api/models?wallet_address=${encodeURIComponent(walletAddress)}`;
       console.log("Calling API:", url);
-      
+
       const response = await fetch(url, {
         method: "GET",
         headers: {
@@ -65,7 +66,7 @@ export default function ModelSupplierPage() {
       }
 
       const data = await response.json();
-      
+
       // Map API response to Model format
       const mappedModels: Model[] = (data.models || []).map((model: {
         id: string;
@@ -76,6 +77,7 @@ export default function ModelSupplierPage() {
         rank: number;
         usedTimes: number;
         rewardTokens: number;
+        githubRepo?: string;
       }) => ({
         id: model.id,
         name: model.name,
@@ -85,8 +87,9 @@ export default function ModelSupplierPage() {
         rank: model.rank,
         usedTimes: model.usedTimes || 0,
         rewardTokens: model.rewardTokens || 0,
+        githubRepo: model.githubRepo,
       }));
-      
+
       setModels(mappedModels);
     } catch (error) {
       console.error("Error loading models:", error);
@@ -131,7 +134,7 @@ export default function ModelSupplierPage() {
 
   const handleSwitchRole = () => {
     if (!walletAddress) return;
-    
+
     const walletRoleMap = localStorage.getItem(WALLET_ROLE_MAP_KEY);
     let map: Record<string, string> = {};
     if (walletRoleMap) {
@@ -213,51 +216,64 @@ export default function ModelSupplierPage() {
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
             {models.map((model) => (
-              <Link key={model.id} href={`/model-supplier/models/${model.id}`}>
-                <Card className="hover:border-cyan-400/50 transition-all cursor-pointer h-full">
-                  <CardHeader>
-                    <div className="flex items-start justify-between mb-2">
-                      <div className="flex-1">
-                        <CardTitle className="text-xl">{model.name}</CardTitle>
-                        <div className="mt-1">
-                          <span className="text-xs font-semibold text-cyan-400 bg-cyan-400/10 px-2 py-1 rounded">
-                            {model.abbreviation}
-                          </span>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-1 text-yellow-400">
-                        <TrendingUp className="h-4 w-4" />
-                        <span className="text-sm font-semibold">#{model.rank}</span>
+              <Card key={model.id} className="hover:border-cyan-400/50 transition-all h-full">
+                <CardHeader>
+                  <div className="flex items-start justify-between mb-2">
+                    <div className="flex-1">
+                      <CardTitle className="text-xl">{model.name}</CardTitle>
+                      <div className="mt-1">
+                        <span className="text-xs font-semibold text-cyan-400 bg-cyan-400/10 px-2 py-1 rounded">
+                          {model.abbreviation}
+                        </span>
                       </div>
                     </div>
-                    <CardDescription className="line-clamp-2">
-                      {model.description}
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="space-y-3">
-                      <div className="flex items-center justify-between text-sm">
-                        <span className="text-slate-400">Category:</span>
-                        <span className="text-white font-medium">{model.category}</span>
+                    <div className="flex items-center gap-1 text-yellow-400">
+                      <TrendingUp className="h-4 w-4" />
+                      <span className="text-sm font-semibold">#{model.rank}</span>
+                    </div>
+                  </div>
+                  <CardDescription className="line-clamp-2">
+                    {model.description}
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="text-slate-400">Category:</span>
+                      <span className="text-white font-medium">{model.category}</span>
+                    </div>
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="text-slate-400">Used Times:</span>
+                      <span className="text-white font-medium">{model.usedTimes.toLocaleString()}</span>
+                    </div>
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="text-slate-400">Reward Tokens:</span>
+                      <div className="flex items-center gap-1 text-green-400">
+                        <Coins className="h-4 w-4" />
+                        <span className="font-semibold">{model.rewardTokens.toLocaleString()}</span>
                       </div>
+                    </div>
+                    {model.githubRepo && (
                       <div className="flex items-center justify-between text-sm">
-                        <span className="text-slate-400">Used Times:</span>
-                        <span className="text-white font-medium">{model.usedTimes.toLocaleString()}</span>
+                        <span className="text-slate-400">Github:</span>
+                        <a
+                          href={model.githubRepo}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-cyan-400 hover:underline truncate max-w-[150px]"
+                        >
+                          Repo Link
+                        </a>
                       </div>
-                      <div className="flex items-center justify-between text-sm">
-                        <span className="text-slate-400">Reward Tokens:</span>
-                        <div className="flex items-center gap-1 text-green-400">
-                          <Coins className="h-4 w-4" />
-                          <span className="font-semibold">{model.rewardTokens.toLocaleString()}</span>
-                        </div>
-                      </div>
-                      <div className="pt-2 flex items-center text-cyan-400 text-sm font-medium">
+                    )}
+                    <Link href={`/model-supplier/models/${model.id}`}>
+                      <div className="pt-2 flex items-center text-cyan-400 text-sm font-medium cursor-pointer hover:text-cyan-300 transition-colors">
                         View Details <ArrowRight className="ml-2 h-4 w-4" />
                       </div>
-                    </div>
-                  </CardContent>
-                </Card>
-              </Link>
+                    </Link>
+                  </div>
+                </CardContent>
+              </Card>
             ))}
           </div>
         )}

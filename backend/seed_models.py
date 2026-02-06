@@ -47,6 +47,7 @@ async def seed_models() -> None:
                 "version": "2.1.0",
                 "accuracy": 94.5,
                 "parameters": 1250000,
+                "github_repo": "https://github.com/example/customer-segmentation",
             },
             {
                 "wallet_address": default_wallet,

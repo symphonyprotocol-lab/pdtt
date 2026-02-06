@@ -33,6 +33,7 @@ interface Model {
   version: string;
   accuracy: number;
   parameters: number;
+  githubRepo?: string | null;
 }
 
 export default function ModelDetailPage() {
@@ -87,7 +88,7 @@ export default function ModelDetailPage() {
       const API_BASE = (process.env.NEXT_PUBLIC_BACKEND_URL && process.env.NEXT_PUBLIC_BACKEND_URL.replace(/\/$/, "")) || "http://localhost:8000";
       const url = `${API_BASE}/api/models/${modelId}`;
       console.log("Calling API:", url);
-      
+
       const response = await fetch(url, {
         method: "GET",
         headers: {
@@ -105,7 +106,7 @@ export default function ModelDetailPage() {
       }
 
       const apiModel = await response.json();
-      
+
       // Map API response to Model format
       const mappedModel: Model = {
         id: apiModel.id,
@@ -121,8 +122,9 @@ export default function ModelDetailPage() {
         version: apiModel.version || "1.0.0",
         accuracy: apiModel.accuracy || 0.0,
         parameters: apiModel.parameters || 0,
+        githubRepo: apiModel.githubRepo,
       };
-      
+
       setModel(mappedModel);
     } catch (error) {
       console.error("Error loading model:", error);
@@ -144,7 +146,7 @@ export default function ModelDetailPage() {
     try {
       const API_BASE = (process.env.NEXT_PUBLIC_BACKEND_URL && process.env.NEXT_PUBLIC_BACKEND_URL.replace(/\/$/, "")) || "http://localhost:8000";
       const url = `${API_BASE}/api/models/${modelId}`;
-      
+
       const response = await fetch(url, {
         method: "DELETE",
         headers: {
@@ -158,7 +160,7 @@ export default function ModelDetailPage() {
       }
 
       toast.success("Model deleted successfully");
-      
+
       // Redirect to models list
       router.push("/model-supplier");
     } catch (error) {
@@ -246,6 +248,20 @@ export default function ModelDetailPage() {
                     <p className="text-sm text-slate-400 mb-1">Parameters</p>
                     <p className="text-lg font-semibold">{model.parameters.toLocaleString()}</p>
                   </div>
+                  {model.githubRepo && (
+                    <div className="col-span-2 pt-2 border-t border-slate-800 mt-2">
+                      <p className="text-sm text-slate-400 mb-1">Github Repository</p>
+                      <a
+                        href={model.githubRepo}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-cyan-400 hover:underline flex items-center gap-2"
+                      >
+                        {model.githubRepo}
+                        <ArrowLeft className="h-3 w-3 rotate-135" />
+                      </a>
+                    </div>
+                  )}
                 </div>
               </CardContent>
             </Card>
@@ -267,8 +283,8 @@ export default function ModelDetailPage() {
                     <Settings className="h-4 w-4 mr-2" />
                     Edit Model
                   </Button>
-                  <Button 
-                    variant="outline" 
+                  <Button
+                    variant="outline"
                     className="w-full justify-start text-red-400 hover:text-red-300 hover:bg-red-500/10 border-red-400/50"
                     onClick={handleDeleteClick}
                     disabled={deleting}

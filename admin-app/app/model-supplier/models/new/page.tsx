@@ -31,6 +31,7 @@ export default function NewModelPage() {
     version: "1.0.0",
     accuracy: "0.0",
     parameters: "0",
+    githubRepo: "",
   });
 
   const walletAddress = useMemo(() => {
@@ -87,6 +88,7 @@ export default function NewModelPage() {
         version: formData.version.trim() || "1.0.0",
         accuracy: parseFloat(formData.accuracy) || 0.0,
         parameters: parseInt(formData.parameters) || 0,
+        githubRepo: formData.githubRepo.trim() || null,
       };
 
       const url = `${buildApiUrl("/models")}?wallet_address=${encodeURIComponent(walletAddress)}`;
@@ -107,7 +109,7 @@ export default function NewModelPage() {
 
       const data = await response.json();
       toast.success("Model created successfully!");
-      
+
       // Redirect to model detail page
       router.push(`/model-supplier/models/${data.modelId}`);
     } catch (error) {
@@ -263,6 +265,20 @@ export default function NewModelPage() {
                     className="bg-slate-800 border-slate-700 text-white"
                   />
                 </div>
+              </div>
+
+              <div className="space-y-2">
+                <label htmlFor="githubRepo" className="text-sm font-medium text-slate-300">
+                  Github Repo URL
+                </label>
+                <Input
+                  id="githubRepo"
+                  name="githubRepo"
+                  value={formData.githubRepo}
+                  onChange={handleChange}
+                  placeholder="https://github.com/username/repo"
+                  className="bg-slate-800 border-slate-700 text-white"
+                />
               </div>
 
               <div className="flex gap-4 pt-4">

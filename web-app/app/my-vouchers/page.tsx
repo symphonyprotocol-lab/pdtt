@@ -26,6 +26,8 @@ interface UserVoucher {
   declined_at: string | null
   used_at: string | null
   expired_at: string | null
+  target_store?: string | null
+  target_item?: string | null
 }
 
 interface UserVouchersResponse {
@@ -235,6 +237,8 @@ export default function MyVouchersPage() {
                         description: description,
                         imageUrl: imageUrl,
                         tokenAmount: tokenAmount,
+                        targetStore: voucher.target_store,
+                        targetItem: voucher.target_item,
                       }}
                     />
 

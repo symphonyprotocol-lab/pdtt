@@ -11,4 +11,7 @@ dependencies = [
     "asyncpg>=0.29.0",
     "pydantic-settings>=2.6.1",
     "greenlet>=3.0.3",
+    "aptos-sdk>=0.11.0",
 ]
+venv = ".venv"
+venvPath = ".venv/bin/python" 

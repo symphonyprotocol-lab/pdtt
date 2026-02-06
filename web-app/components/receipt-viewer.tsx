@@ -321,14 +321,14 @@ export function ReceiptViewer({ receiptData, imageUrl, matchedVouchers, usedVouc
                     <span>{receiptData.invoice.payment.method}</span>
                   </div>
                 )}
-                {receiptData.invoice.payment.amount_paid !== undefined && (
+                {/*receiptData.invoice.payment.amount_paid !== undefined && (
                   <div className="flex justify-between text-slate-300">
                     <span>Amount Paid</span>
                     <span>
                       {formatCurrency(receiptData.invoice.payment.amount_paid, receiptData.meta?.currency)}
                     </span>
                   </div>
-                )}
+                )}*/}
                 {receiptData.invoice.payment.change !== undefined && receiptData.invoice.payment.change > 0 && (
                   <div className="flex justify-between text-green-400">
                     <span>Change</span>

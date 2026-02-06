@@ -19,6 +19,8 @@ const buildApiUrl = (path: string) => `${API_BASE}/api${path}`;
 
 interface AIResponse {
   targetGroup: string;
+  targetStore?: string | null;
+  targetItem?: string | null;
   userPortrait: {
     demographics: string;
     interests: string[];
@@ -158,6 +160,8 @@ export default function CompanyUserPage() {
 
       const parsedResponse: AIResponse = {
         targetGroup: data.targetGroup || "Target Group",
+        targetStore: data.targetStore || null,
+        targetItem: data.targetItem || null,
         userPortrait: {
           demographics: data.userPortrait?.demographics || "",
           interests: Array.isArray(data.userPortrait?.interests)
@@ -351,6 +355,8 @@ export default function CompanyUserPage() {
           query: query.trim(),
           budget: budgetAmount,
           targetGroup: aiResponse.targetGroup,
+          targetStore: aiResponse.targetStore || null,
+          targetItem: aiResponse.targetItem || null,
           userPortrait: {
             ...aiResponse.userPortrait,
             usedModels: aiResponse.userPortrait.usedModels || ["Customer Segmentation Model"],
@@ -497,6 +503,25 @@ export default function CompanyUserPage() {
                 </CardHeader>
                 <CardContent>
                   <p className="text-lg font-semibold mb-4">{aiResponse.targetGroup}</p>
+                  {(aiResponse.targetStore || aiResponse.targetItem) && (
+                    <div className="mb-4 p-4 bg-purple-500/10 border border-purple-400/30 rounded-lg">
+                      <p className="text-sm font-semibold text-purple-400 mb-2">Campaign Targeting:</p>
+                      <div className="space-y-2">
+                        {aiResponse.targetStore && (
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs text-slate-400">Target Store:</span>
+                            <span className="text-sm font-medium text-white">{aiResponse.targetStore}</span>
+                          </div>
+                        )}
+                        {aiResponse.targetItem && (
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs text-slate-400">Target Item:</span>
+                            <span className="text-sm font-medium text-white">{aiResponse.targetItem}</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
                   {aiResponse.targetPersonCount !== undefined && (
                     <div className="mt-4 p-4 bg-cyan-500/10 border border-cyan-400/30 rounded-lg">
                       <div className="flex items-center justify-between">
@@ -633,7 +658,11 @@ export default function CompanyUserPage() {
                       <p className="text-xs text-slate-400 mt-2">Default reward amount (will update after budget is set)</p>
                     </div>
                   )}
-                  <CouponVoucher couponDesign={aiResponse.couponDesign} />
+                  <CouponVoucher couponDesign={{
+                    ...aiResponse.couponDesign,
+                    targetStore: aiResponse.targetStore,
+                    targetItem: aiResponse.targetItem
+                  }} />
                 </CardContent>
               </Card>
 

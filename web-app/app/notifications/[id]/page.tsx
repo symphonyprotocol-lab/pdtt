@@ -205,6 +205,8 @@ export default function NotificationDetailPage() {
   const description = (typeof voucherDetail.description === 'string' ? voucherDetail.description : null) ||
     notification.content
   const tokenAmount = typeof voucherDetail.tokenAmount === 'number' ? voucherDetail.tokenAmount : undefined
+  const targetStore = (typeof voucherDetail.targetStore === 'string' ? voucherDetail.targetStore : null) || undefined
+  const targetItem = (typeof voucherDetail.targetItem === 'string' ? voucherDetail.targetItem : null) || undefined
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-purple-950 to-slate-950">
@@ -259,6 +261,8 @@ export default function NotificationDetailPage() {
               description: description,
               imageUrl: imageUrl,
               tokenAmount: tokenAmount,
+              targetStore: targetStore,
+              targetItem: targetItem,
             }}
           />
 

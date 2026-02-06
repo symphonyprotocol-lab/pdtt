@@ -4,7 +4,7 @@ from typing import Annotated, List
 from uuid import UUID, uuid4
 import random
 
-from fastapi import Depends, FastAPI, HTTPException, Query, status
+from fastapi import Depends, FastAPI, HTTPException, Query, status, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from openai import AsyncOpenAI, OpenAIError
 from pydantic import BaseModel, Field, ConfigDict
@@ -15,6 +15,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, selectinload
 import json
 import os
+import base64
+from aptos_sdk.account import Account, AccountAddress
+from aptos_sdk.async_client import RestClient
+from aptos_sdk.transactions import EntryFunction, SignedTransaction, TransactionArgument, Serializer
 
 
 class Settings(BaseSettings):
@@ -28,6 +32,14 @@ class Settings(BaseSettings):
             "and trade their personal data responsibly. Keep responses concise "
             "and actionable."
         )
+    )
+    # Aptos configuration for SYM token transfers (optional - only needed for transfer endpoint)
+    aptos_private_key: str | None = Field(default=None, alias="APTOS_PRIVATE_KEY")
+    aptos_account_address: str | None = Field(default=None, alias="APTOS_ACCOUNT_ADDRESS")
+    aptos_network: str = Field(default="testnet", alias="APTOS_NETWORK")
+    sym_token_module_address: str = Field(
+        default="0x6d0747e1d4281cb3e0894949c7410bb7351dfe831c3b294d53245ad94dfc0dd3",
+        alias="SYM_TOKEN_MODULE_ADDRESS"
     )
 
     model_config = SettingsConfigDict(
@@ -180,6 +192,8 @@ class Campaign(Base):
     user_portrait: Mapped[dict] = mapped_column(JSON)  # {demographics, interests[], behavior, usedModels[]}
     coupon_design: Mapped[dict] = mapped_column(JSON)  # {description, imageUrl}
     target_wallet_addresses: Mapped[List[str]] = mapped_column(JSON, default=list)  # List of target wallet addresses
+    target_store: Mapped[str | None] = mapped_column(Text, nullable=True)  # Specific store name if user specifies
+    target_item: Mapped[str | None] = mapped_column(Text, nullable=True)  # Specific item/product if user specifies
     status: Mapped[str] = mapped_column(String(32), default="pending")  # pending, running, completed, failed, stopped
     user_count: Mapped[int] = mapped_column(default=0)
     coupon_sent: Mapped[int] = mapped_column(default=0)
@@ -218,6 +232,8 @@ class UserVoucher(Base):
     campaign_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), nullable=False, index=True)
     voucher_detail: Mapped[dict] = mapped_column(JSON)  # Stores coupon design details
     condition: Mapped[str | None] = mapped_column(Text, nullable=True)  # AI-readable validation criteria for receipt matching
+    target_store: Mapped[str | None] = mapped_column(Text, nullable=True)  # Specific store name copied from campaign
+    target_item: Mapped[str | None] = mapped_column(Text, nullable=True)  # Specific item/product copied from campaign
     status: Mapped[str] = mapped_column(String(32), default="wait_to_user", index=True)  # wait_to_user, accepted, declined, used, expired
     created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
     accepted_at: Mapped[datetime | None] = mapped_column(nullable=True)
@@ -241,8 +257,58 @@ class Model(Base):
     version: Mapped[str] = mapped_column(String(32), default="1.0.0")
     accuracy: Mapped[float] = mapped_column(default=0.0)  # Model accuracy percentage
     parameters: Mapped[int] = mapped_column(default=0)  # Number of model parameters
+    github_repo: Mapped[str | None] = mapped_column(String(512), nullable=True)  # Link to Github repository
     created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class Activity(Base):
+    __tablename__ = "activities"
+
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)  # 'daily', 'merchant', 'model_developer'
+    title: Mapped[str] = mapped_column(String(256), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    reward_tokens: Mapped[float] = mapped_column(default=0.0)
+    target_count: Mapped[int] = mapped_column(default=1)  # e.g., upload 3 receipts
+    activity_data: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # Additional data specific to activity type
+    # For merchant activities
+    merchant_wallet_address: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    campaign_id: Mapped[UUID | None] = mapped_column(PGUUID, nullable=True)
+    # For model developer activities
+    model_id: Mapped[UUID | None] = mapped_column(PGUUID, nullable=True, index=True)
+    model_developer_wallet_address: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Status and timing
+    is_active: Mapped[bool] = mapped_column(default=True, index=True)
+    start_date: Mapped[datetime | None] = mapped_column(nullable=True)
+    end_date: Mapped[datetime | None] = mapped_column(nullable=True)
+    created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    progress: Mapped[List["UserActivityProgress"]] = relationship(
+        back_populates="activity", cascade="all, delete-orphan"
+    )
+
+
+class UserActivityProgress(Base):
+    __tablename__ = "user_activity_progress"
+
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    wallet_address: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    activity_id: Mapped[UUID] = mapped_column(
+        PGUUID, ForeignKey("activities.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    current_count: Mapped[int] = mapped_column(default=0)
+    target_count: Mapped[int] = mapped_column(nullable=False)
+    is_completed: Mapped[bool] = mapped_column(default=False, index=True)
+    reward_claimed: Mapped[bool] = mapped_column(default=False)
+    completed_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    activity: Mapped[Activity] = relationship(back_populates="progress")
 
 
 async def get_session() -> AsyncSession:
@@ -505,10 +571,13 @@ async def _process_receipt_ocr(image_url: str, session: AsyncSession) -> dict:
             ],
             max_tokens=4000,
         )
+        print(ocr_completion)
         
         raw_json_text = ocr_completion.choices[0].message.content
         if not raw_json_text:
             raise ValueError("Empty OCR response")
+        
+        print(raw_json_text)
         
         # Step 2: Use the OCR prompt template to structure the data
         ocr_template = await _load_ocr_prompt(session)
@@ -789,7 +858,7 @@ async def _validate_vouchers_against_receipt(
     receipt_data: dict
 ) -> list[dict]:
     """Validate user vouchers against receipt data using AI."""
-    print(f"\n=== VOUCHER VALIDATION START ===")
+    print("\n=== VOUCHER VALIDATION START ===")
     print(f"Wallet address: {wallet_address}")
     
     # Fetch unused vouchers for this user
@@ -837,6 +906,11 @@ Voucher Condition: {condition}
 
 Receipt Info: {receipt_summary}
 
+IMPORTANT MATCHING RULES:
+- For item/product matching: If the voucher requires a specific item (e.g., "Latte"), the receipt item should CONTAIN that keyword (case-insensitive). For example, "Matcha Oat Latte" contains "latte" and should be considered a match.
+- For store matching: The store name should match exactly or be very similar.
+- Be flexible with item names - partial matches are acceptable if the core item keyword is present.
+
 Does this receipt match the voucher condition? Answer with ONLY 'yes' or 'no' followed by a brief explanation."""
             print(f"Prompt: {prompt}")
 
@@ -845,7 +919,7 @@ Does this receipt match the voucher condition? Answer with ONLY 'yes' or 'no' fo
             response = await openai_client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
-                    {"role": "system", "content": "You are a voucher validation assistant. Be strict but fair in matching receipts to voucher conditions."},
+                    {"role": "system", "content": "You are a voucher validation assistant. Be flexible with item matching - if a receipt item contains the target item keyword (case-insensitive), consider it a match. For example, 'Matcha Oat Latte' matches 'Latte'."},
                     {"role": "user", "content": prompt}
                 ],
                 max_tokens=100,
@@ -856,7 +930,7 @@ Does this receipt match the voucher condition? Answer with ONLY 'yes' or 'no' fo
             print(f"AI response: {ai_response}")
             
             # Check if AI says yes
-            if ai_response.startswith("yes") or ai_response.startswith("no"):
+            if ai_response.startswith("yes"):
                 print(f"✓ MATCH! Updating voucher status to 'accepted'")
                 
                 # Update voucher status to accepted
@@ -1292,6 +1366,17 @@ class UpdateShareToEarnRequest(BaseModel):
     selected_categories: dict[str, bool] | None = None
 
 
+class TransferSymTokenRequest(BaseModel):
+    to_address: str = Field(..., description="Recipient wallet address")
+    amount: float = Field(..., gt=0, description="Amount of SYM tokens to transfer (will be converted to u64 with 8 decimals)")
+
+
+class TransferSymTokenResponse(BaseModel):
+    success: bool
+    transaction_hash: str | None = None
+    message: str
+
+
 class CampaignAnalyzeRequest(BaseModel):
     wallet_address: str = Field(alias="walletAddress")
     query: str
@@ -1301,6 +1386,8 @@ class CampaignAnalyzeResponse(BaseModel):
     targetGroup: str
     userPortrait: dict
     couponDesign: dict
+    targetStore: str | None = Field(default=None, alias="targetStore")
+    targetItem: str | None = Field(default=None, alias="targetItem")
     targetPersonCount: int = Field(alias="targetPersonCount", default=0)
     targetWalletAddresses: List[str] = Field(alias="targetWalletAddresses", default_factory=list)
 
@@ -1312,6 +1399,8 @@ class CampaignCreateRequest(BaseModel):
     targetGroup: str
     userPortrait: dict
     couponDesign: dict
+    targetStore: str | None = Field(default=None, alias="targetStore")
+    targetItem: str | None = Field(default=None, alias="targetItem")
     targetWalletAddresses: List[str] = Field(alias="targetWalletAddresses", default_factory=list)
 
 
@@ -1330,6 +1419,8 @@ class CampaignResource(BaseModel):
     couponSent: int = Field(alias="couponSent")
     couponUsed: int = Field(alias="couponUsed", default=0)
     targetWalletAddresses: List[str] = Field(alias="targetWalletAddresses", default_factory=list)
+    targetStore: str | None = Field(default=None, alias="targetStore")
+    targetItem: str | None = Field(default=None, alias="targetItem")
     userPortrait: dict = Field(default_factory=dict, alias="userPortrait")
     couponDesign: dict = Field(default_factory=dict, alias="couponDesign")
     createdAt: datetime = Field(alias="createdAt")
@@ -1387,6 +1478,7 @@ class ModelResource(BaseModel):
     version: str = "1.0.0"
     accuracy: float = 0.0
     parameters: int = 0
+    githubRepo: str | None = Field(default=None, alias="githubRepo")
     createdAt: datetime = Field(alias="createdAt")
     updatedAt: datetime = Field(alias="updatedAt")
 
@@ -1405,6 +1497,7 @@ class ModelCreateRequest(BaseModel):
     version: str = "1.0.0"
     accuracy: float = 0.0
     parameters: int = 0
+    githubRepo: str | None = Field(default=None, alias="githubRepo")
 
 
 class ModelCreateResponse(BaseModel):
@@ -1682,7 +1775,9 @@ async def analyze_campaign(
 
 The response must be valid JSON with this exact structure:
 {
-  "targetGroup": "A concise description of the target customer group (e.g., 'Coffee Enthusiasts (Ages 25-45)')",
+  "targetGroup": "A concise description of the target customer group (e.g., 'Coffee Enthusiasts')",
+  "targetStore": "Specific store name if user mentions a particular store (e.g., 'Starbucks', 'Target'), otherwise null",
+  "targetItem": "Specific item/product if user mentions a particular item (e.g., 'Latte', 'iPhone', 'Running Shoes'), otherwise null",
   "userPortrait": {
     "demographics": "Detailed demographics description",
     "interests": ["Interest1", "Interest2", "Interest3", "Interest4"],
@@ -1701,6 +1796,7 @@ The response must be valid JSON with this exact structure:
 }
 
 The searchCriteria should help identify users from their receipt data. Extract relevant keywords, store names, product categories, and item descriptions from the campaign query.
+If the user specifies a particular store or item in their campaign request, extract it and populate targetStore and/or targetItem. These fields should be null if not specified.
 Make sure the coupon design is attractive and relevant to the target audience. The imagePrompt should be detailed enough for image generation."""
 
     try:
@@ -1937,6 +2033,8 @@ Make sure the coupon design is attractive and relevant to the target audience. T
                 "behavior": ""
             }),
             couponDesign=coupon_design,
+            targetStore=analysis_data.get("targetStore"),
+            targetItem=analysis_data.get("targetItem"),
             targetPersonCount=final_count,
             targetWalletAddresses=final_addresses
         )
@@ -2018,6 +2116,8 @@ async def create_campaign(
         user_portrait=payload.userPortrait,
         coupon_design=payload.couponDesign,
         target_wallet_addresses=target_addresses,
+        target_store=payload.targetStore,
+        target_item=payload.targetItem,
         status="pending",
         user_count=len(target_addresses),  # Set initial user count
     )
@@ -2075,6 +2175,8 @@ async def get_campaign_detail(
         couponSent=campaign.coupon_sent,
         couponUsed=campaign.coupon_used,
         targetWalletAddresses=campaign.target_wallet_addresses or [],
+        targetStore=campaign.target_store,
+        targetItem=campaign.target_item,
         userPortrait=campaign.user_portrait or {},
         couponDesign=campaign.coupon_design or {},
         createdAt=campaign.created_at,
@@ -2112,6 +2214,8 @@ async def get_campaigns(
                 couponSent=campaign.coupon_sent,
                 couponUsed=campaign.coupon_used,
                 targetWalletAddresses=campaign.target_wallet_addresses or [],
+                targetStore=campaign.target_store,
+                targetItem=campaign.target_item,
                 userPortrait=campaign.user_portrait or {},
                 couponDesign=campaign.coupon_design or {},
                 createdAt=campaign.created_at,
@@ -2195,9 +2299,11 @@ async def campaign_action(
                 notification_title = f"Special Offer: {campaign.target_group}"
                 notification_content = f"You've received a special coupon! {campaign.coupon_design.get('description', 'Check out this exclusive offer.')}"
                 
-                # Add amount to voucher detail
+                # Add amount and target info to voucher detail
                 voucher_detail = campaign.coupon_design.copy()
                 voucher_detail['tokenAmount'] = amount_per_user
+                voucher_detail['targetStore'] = campaign.target_store
+                voucher_detail['targetItem'] = campaign.target_item
 
                 notification = Notification(
                     campaign_id=campaign.id,
@@ -2267,32 +2373,53 @@ async def get_notifications(
     normalized = _normalize_wallet_address(wallet_address)
     
     stmt = (
-        select(Notification)
+        select(Notification, Campaign)
+        .join(Campaign, Notification.campaign_id == Campaign.id)
         .where(Notification.target_user_address == normalized)
         .order_by(Notification.created_at.desc())
     )
     result = await session.execute(stmt)
-    notifications = result.scalars().all()
+    rows = result.all()
+    
+    notifications_resources = []
+    for notification, campaign in rows:
+        # Inject target info if missing (for backward compatibility)
+        if notification.voucher_detail and "targetStore" not in notification.voucher_detail:
+            # We need to create a copy or modify the dict. 
+            # Since voucher_detail is a JSON field, modifying it on the object might trigger an update if we commit,
+            # but we are only reading here.
+            # However, SQLAlchemy might track changes. To be safe and avoid side effects, we can just use the values 
+            # when creating the resource, or update the dict in memory.
+            # Let's update the dict in memory for the response.
+            if not isinstance(notification.voucher_detail, dict):
+                notification.voucher_detail = {}
+            
+            # Create a new dict to avoid modifying the DB object's state if it's tracked
+            updated_detail = notification.voucher_detail.copy()
+            updated_detail["targetStore"] = campaign.target_store
+            updated_detail["targetItem"] = campaign.target_item
+            notification.voucher_detail = updated_detail
+
+        notifications_resources.append(
+            NotificationResource(
+                id=str(notification.id),
+                campaignId=str(notification.campaign_id),
+                targetUserAddress=notification.target_user_address,
+                title=notification.title,
+                content=notification.content,
+                voucherDetail=notification.voucher_detail,
+                delivered=notification.delivered,
+                read=notification.read,
+                userAccepted=notification.user_accepted,
+                createdAt=notification.created_at,
+                deliveredAt=notification.delivered_at,
+                readAt=notification.read_at,
+                acceptedAt=notification.accepted_at,
+            )
+        )
     
     return NotificationsResponse(
-        notifications=[
-            NotificationResource(
-                id=str(notif.id),
-                campaignId=str(notif.campaign_id),
-                targetUserAddress=notif.target_user_address,
-                title=notif.title,
-                content=notif.content,
-                voucherDetail=notif.voucher_detail,
-                delivered=notif.delivered,
-                read=notif.read,
-                userAccepted=notif.user_accepted,
-                createdAt=notif.created_at,
-                deliveredAt=notif.delivered_at,
-                readAt=notif.read_at,
-                acceptedAt=notif.accepted_at,
-            )
-            for notif in notifications
-        ]
+        notifications=notifications_resources
     )
 
 
@@ -2326,6 +2453,19 @@ async def mark_notification_delivered(
         await session.commit()
         await session.refresh(notification)
     
+    # Inject target info if missing
+    if notification.voucher_detail and "targetStore" not in notification.voucher_detail:
+        campaign_stmt = select(Campaign).where(Campaign.id == notification.campaign_id)
+        campaign_result = await session.execute(campaign_stmt)
+        campaign = campaign_result.scalar_one_or_none()
+        if campaign:
+            if not isinstance(notification.voucher_detail, dict):
+                notification.voucher_detail = {}
+            updated_detail = notification.voucher_detail.copy()
+            updated_detail["targetStore"] = campaign.target_store
+            updated_detail["targetItem"] = campaign.target_item
+            notification.voucher_detail = updated_detail
+
     return NotificationResource(
         id=str(notification.id),
         campaignId=str(notification.campaign_id),
@@ -2378,12 +2518,26 @@ async def mark_notification_accepted(
         
         # Generate AI-readable condition for receipt validation
         condition = None
+        target_store = None
+        target_item = None
+        
         if campaign:
             target_group = campaign.target_group or "general purchases"
             user_portrait_desc = campaign.user_portrait.get("description", "") if campaign.user_portrait else ""
             coupon_desc = campaign.coupon_design.get("description", "") if campaign.coupon_design else ""
             
+            # Get target store and item from campaign
+            target_store = campaign.target_store
+            target_item = campaign.target_item
+            
             parts = [f"Valid for {target_group}."]
+            
+            # Add specific store/item requirements to condition
+            if target_store:
+                parts.append(f"Must be used at {target_store}.")
+            if target_item:
+                parts.append(f"Must include purchase of {target_item}.")
+                
             if user_portrait_desc:
                 parts.append(f"Targeting: {user_portrait_desc}.")
             if coupon_desc:
@@ -2398,6 +2552,8 @@ async def mark_notification_accepted(
             campaign_id=notification.campaign_id,
             voucher_detail=notification.voucher_detail,
             condition=condition,
+            target_store=target_store,
+            target_item=target_item,
             status="wait_to_user",
             accepted_at=datetime.utcnow(),
         )
@@ -2414,6 +2570,17 @@ async def mark_notification_accepted(
         await session.commit()
         await session.refresh(notification)
     
+    # Inject target info if missing
+    if notification.voucher_detail and "targetStore" not in notification.voucher_detail:
+        campaign_stmt = select(Campaign).where(Campaign.id == notification.campaign_id)
+        campaign_result = await session.execute(campaign_stmt)
+        campaign = campaign_result.scalar_one_or_none()
+        if campaign:
+            if not isinstance(notification.voucher_detail, dict):
+                notification.voucher_detail = {}
+            notification.voucher_detail["targetStore"] = campaign.target_store
+            notification.voucher_detail["targetItem"] = campaign.target_item
+
     return NotificationResource(
         id=str(notification.id),
         campaignId=str(notification.campaign_id),
@@ -2463,6 +2630,17 @@ async def mark_notification_declined(
     await session.commit()
     await session.refresh(notification)
     
+    # Inject target info if missing
+    if notification.voucher_detail and "targetStore" not in notification.voucher_detail:
+        campaign_stmt = select(Campaign).where(Campaign.id == notification.campaign_id)
+        campaign_result = await session.execute(campaign_stmt)
+        campaign = campaign_result.scalar_one_or_none()
+        if campaign:
+            if not isinstance(notification.voucher_detail, dict):
+                notification.voucher_detail = {}
+            notification.voucher_detail["targetStore"] = campaign.target_store
+            notification.voucher_detail["targetItem"] = campaign.target_item
+
     return NotificationResource(
         id=str(notification.id),
         campaignId=str(notification.campaign_id),
@@ -2538,6 +2716,8 @@ class UserVoucherResource(BaseModel):
     campaign_id: str
     voucher_detail: dict
     condition: str | None = None
+    targetStore: str | None = Field(default=None, alias="target_store")
+    targetItem: str | None = Field(default=None, alias="target_item")
     status: str
     created_at: datetime
     accepted_at: datetime | None = None
@@ -2561,21 +2741,39 @@ async def get_user_vouchers(
     normalized = _normalize_wallet_address(wallet_address)
     
     stmt = (
-        select(UserVoucher)
+        select(UserVoucher, Campaign)
+        .join(Campaign, UserVoucher.campaign_id == Campaign.id)
         .where(UserVoucher.wallet_address == normalized)
         .order_by(UserVoucher.created_at.desc())
     )
     result = await session.execute(stmt)
-    vouchers = result.scalars().all()
+    rows = result.all()
     
-    return UserVouchersResponse(
-        vouchers=[
+    vouchers_resources = []
+    for voucher, campaign in rows:
+        # Use stored target_store and target_item, or fall back to campaign values
+        target_store = voucher.target_store or campaign.target_store
+        target_item = voucher.target_item or campaign.target_item
+        
+        # Inject target info into voucher_detail if missing (for backward compatibility)
+        if voucher.voucher_detail and "targetStore" not in voucher.voucher_detail:
+            if not isinstance(voucher.voucher_detail, dict):
+                voucher.voucher_detail = {}
+            updated_detail = voucher.voucher_detail.copy()
+            updated_detail["targetStore"] = target_store
+            updated_detail["targetItem"] = target_item
+            voucher.voucher_detail = updated_detail
+        
+        vouchers_resources.append(
             UserVoucherResource(
                 id=str(voucher.id),
                 wallet_address=voucher.wallet_address,
                 notification_id=str(voucher.notification_id),
                 campaign_id=str(voucher.campaign_id),
                 voucher_detail=voucher.voucher_detail,
+                condition=voucher.condition,
+                targetStore=target_store,
+                targetItem=target_item,
                 status=voucher.status,
                 created_at=voucher.created_at,
                 accepted_at=voucher.accepted_at,
@@ -2583,9 +2781,9 @@ async def get_user_vouchers(
                 used_at=voucher.used_at,
                 expired_at=voucher.expired_at,
             )
-            for voucher in vouchers
-        ]
-    )
+        )
+    
+    return UserVouchersResponse(vouchers=vouchers_resources)
 
 
 @app.put("/api/campaigns/{campaign_id}/coupon-used", response_model=CampaignCreateResponse)
@@ -2717,6 +2915,7 @@ async def get_models(
                 version=model.version,
                 accuracy=model.accuracy,
                 parameters=model.parameters,
+                githubRepo=model.github_repo,
                 createdAt=model.created_at,
                 updatedAt=model.updated_at,
             )
@@ -2761,6 +2960,7 @@ async def get_model(
         version=model.version,
         accuracy=model.accuracy,
         parameters=model.parameters,
+        githubRepo=model.github_repo,
         createdAt=model.created_at,
         updatedAt=model.updated_at,
     )
@@ -2780,6 +2980,7 @@ async def create_model(
     print(f"  - Name: {payload.name}")
     print(f"  - Category: {payload.category}")
     print(f"  - Version: {payload.version}")
+    print(f"  - Github Repo: {payload.githubRepo}")
     
     # Calculate initial rank (will be updated based on usage)
     # For now, set to 0, will be calculated based on used_times later
@@ -2792,6 +2993,7 @@ async def create_model(
         version=payload.version,
         accuracy=payload.accuracy,
         parameters=payload.parameters,
+        github_repo=payload.githubRepo,
         rank=0,  # Initial rank
         used_times=0,
         reward_tokens=0.0,
@@ -2847,6 +3049,282 @@ async def delete_model(
     return {
         "success": True,
         "message": "Model deleted successfully"
+    }
+
+
+# Activity API Endpoints
+
+class ActivityResource(BaseModel):
+    id: UUID
+    type: str
+    title: str
+    description: str
+    reward_tokens: float = Field(alias="rewardTokens")
+    target_count: int = Field(alias="targetCount")
+    activity_data: dict | None = Field(default=None, alias="activityData")
+    merchant_wallet_address: str | None = Field(default=None, alias="merchantWalletAddress")
+    campaign_id: UUID | None = Field(default=None, alias="campaignId")
+    model_id: UUID | None = Field(default=None, alias="modelId")
+    model_developer_wallet_address: str | None = Field(default=None, alias="modelDeveloperWalletAddress")
+    is_active: bool = Field(alias="isActive")
+    start_date: datetime | None = Field(default=None, alias="startDate")
+    end_date: datetime | None = Field(default=None, alias="endDate")
+    created_at: datetime = Field(alias="createdAt")
+
+    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
+
+
+class UserActivityProgressResource(BaseModel):
+    id: UUID
+    wallet_address: str = Field(alias="walletAddress")
+    activity_id: UUID = Field(alias="activityId")
+    current_count: int = Field(alias="currentCount")
+    target_count: int = Field(alias="targetCount")
+    is_completed: bool = Field(alias="isCompleted")
+    reward_claimed: bool = Field(alias="rewardClaimed")
+    completed_at: datetime | None = Field(default=None, alias="completedAt")
+    created_at: datetime = Field(alias="createdAt")
+
+    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
+
+
+class ActivityWithProgressResource(ActivityResource):
+    progress: UserActivityProgressResource | None = None
+
+
+class ActivitiesResponse(BaseModel):
+    activities: List[ActivityWithProgressResource]
+
+
+@app.get("/api/activities", response_model=ActivitiesResponse)
+async def get_activities(
+    wallet_address: str = Query(..., alias="walletAddress"),
+    activity_type: str | None = Query(None, alias="type"),
+    *,
+    session: SessionDep,
+):
+    """Get all activities, optionally filtered by type, with user progress"""
+    wallet_address = _normalize_wallet_address(wallet_address)
+    
+    # Build query
+    stmt = select(Activity).where(Activity.is_active)
+    
+    if activity_type:
+        stmt = stmt.where(Activity.type == activity_type)
+    
+    # Filter by date if applicable
+    now = datetime.utcnow()
+    stmt = stmt.where(
+        (Activity.start_date.is_(None)) | (Activity.start_date <= now)
+    ).where(
+        (Activity.end_date.is_(None)) | (Activity.end_date >= now)
+    )
+    
+    stmt = stmt.order_by(Activity.created_at.desc())
+    result = await session.execute(stmt)
+    activities = result.scalars().all()
+    
+    # Get user progress for each activity
+    activities_with_progress = []
+    for activity in activities:
+        progress_stmt = select(UserActivityProgress).where(
+            UserActivityProgress.wallet_address == wallet_address,
+            UserActivityProgress.activity_id == activity.id
+        )
+        progress_result = await session.execute(progress_stmt)
+        progress = progress_result.scalar_one_or_none()
+        
+        activity_dict = {
+            "id": activity.id,
+            "type": activity.type,
+            "title": activity.title,
+            "description": activity.description,
+            "rewardTokens": activity.reward_tokens,
+            "targetCount": activity.target_count,
+            "activityData": activity.activity_data,
+            "merchantWalletAddress": activity.merchant_wallet_address,
+            "campaignId": activity.campaign_id,
+            "modelId": activity.model_id,
+            "modelDeveloperWalletAddress": activity.model_developer_wallet_address,
+            "isActive": activity.is_active,
+            "startDate": activity.start_date,
+            "endDate": activity.end_date,
+            "createdAt": activity.created_at,
+        }
+        
+        if progress:
+            activity_dict["progress"] = {
+                "id": progress.id,
+                "walletAddress": progress.wallet_address,
+                "activityId": progress.activity_id,
+                "currentCount": progress.current_count,
+                "targetCount": progress.target_count,
+                "isCompleted": progress.is_completed,
+                "rewardClaimed": progress.reward_claimed,
+                "completedAt": progress.completed_at,
+                "createdAt": progress.created_at,
+            }
+        else:
+            # Create default progress entry
+            activity_dict["progress"] = {
+                "id": uuid4(),
+                "walletAddress": wallet_address,
+                "activityId": activity.id,
+                "currentCount": 0,
+                "targetCount": activity.target_count,
+                "isCompleted": False,
+                "rewardClaimed": False,
+                "completedAt": None,
+                "createdAt": datetime.utcnow(),
+            }
+        
+        activities_with_progress.append(ActivityWithProgressResource(**activity_dict))
+    
+    return ActivitiesResponse(activities=activities_with_progress)
+
+
+@app.post("/api/activities/{activity_id}/progress", response_model=UserActivityProgressResource)
+async def update_activity_progress(
+    activity_id: str,
+    wallet_address: str = Query(..., alias="walletAddress"),
+    increment: int = Query(1, ge=1),
+    *,
+    session: SessionDep,
+):
+    """Update user's progress on an activity"""
+    wallet_address = _normalize_wallet_address(wallet_address)
+    
+    try:
+        activity_uuid = UUID(activity_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid activity ID format",
+        )
+    
+    # Get activity
+    activity_stmt = select(Activity).where(Activity.id == activity_uuid)
+    activity_result = await session.execute(activity_stmt)
+    activity = activity_result.scalar_one_or_none()
+    
+    if not activity:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Activity not found",
+        )
+    
+    if not activity.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Activity is not active",
+        )
+    
+    # Get or create progress
+    progress_stmt = select(UserActivityProgress).where(
+        UserActivityProgress.wallet_address == wallet_address,
+        UserActivityProgress.activity_id == activity_uuid
+    )
+    progress_result = await session.execute(progress_stmt)
+    progress = progress_result.scalar_one_or_none()
+    
+    if not progress:
+        progress = UserActivityProgress(
+            wallet_address=wallet_address,
+            activity_id=activity_uuid,
+            current_count=0,
+            target_count=activity.target_count,
+            is_completed=False,
+            reward_claimed=False,
+        )
+        session.add(progress)
+    
+    # Update progress
+    if not progress.is_completed:
+        progress.current_count = min(progress.current_count + increment, activity.target_count)
+        
+        if progress.current_count >= activity.target_count:
+            progress.is_completed = True
+            progress.completed_at = datetime.utcnow()
+    
+    await session.commit()
+    await session.refresh(progress)
+    
+    return UserActivityProgressResource(
+        id=progress.id,
+        walletAddress=progress.wallet_address,
+        activityId=progress.activity_id,
+        currentCount=progress.current_count,
+        targetCount=progress.target_count,
+        isCompleted=progress.is_completed,
+        rewardClaimed=progress.reward_claimed,
+        completedAt=progress.completed_at,
+        createdAt=progress.created_at,
+    )
+
+
+@app.post("/api/activities/{activity_id}/claim", response_model=dict)
+async def claim_activity_reward(
+    activity_id: str,
+    wallet_address: str = Query(..., alias="walletAddress"),
+    *,
+    session: SessionDep,
+):
+    """Claim reward for a completed activity"""
+    wallet_address = _normalize_wallet_address(wallet_address)
+    
+    try:
+        activity_uuid = UUID(activity_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid activity ID format",
+        )
+    
+    # Get progress
+    progress_stmt = select(UserActivityProgress).where(
+        UserActivityProgress.wallet_address == wallet_address,
+        UserActivityProgress.activity_id == activity_uuid
+    )
+    progress_result = await session.execute(progress_stmt)
+    progress = progress_result.scalar_one_or_none()
+    
+    if not progress:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Activity progress not found",
+        )
+    
+    if not progress.is_completed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Activity is not completed",
+        )
+    
+    if progress.reward_claimed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Reward already claimed",
+        )
+    
+    # Get activity to get reward amount
+    activity_stmt = select(Activity).where(Activity.id == activity_uuid)
+    activity_result = await session.execute(activity_stmt)
+    activity = activity_result.scalar_one_or_none()
+    
+    if not activity:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Activity not found",
+        )
+    
+    # Mark reward as claimed
+    progress.reward_claimed = True
+    await session.commit()
+    
+    return {
+        "success": True,
+        "rewardTokens": activity.reward_tokens,
+        "message": "Reward claimed successfully"
     }
 
 
@@ -2984,6 +3462,505 @@ async def claim_voucher(voucher_id: UUID, session: SessionDep):
     await session.commit()
     
     return {"status": "success"}
+
+
+@app.post("/api/receipt/ocr")
+async def process_receipt_ocr(
+    file: UploadFile = File(...),
+    *,
+    session: SessionDep,
+) -> dict:
+    """
+    Process a receipt image using OCR and return structured JSON.
+    
+    Accepts an image file upload and returns the extracted receipt data in JSON format.
+    """
+    try:
+        # Read file content first
+        file_content = await file.read()
+        
+        # Validate file type - check content_type first, then file extension, then magic bytes
+        is_image = False
+        image_format = 'jpeg'
+        
+        if file.content_type and file.content_type.startswith('image/'):
+            is_image = True
+            if 'png' in file.content_type:
+                image_format = 'png'
+            elif 'jpeg' in file.content_type or 'jpg' in file.content_type:
+                image_format = 'jpeg'
+            elif 'webp' in file.content_type:
+                image_format = 'webp'
+            elif 'gif' in file.content_type:
+                image_format = 'gif'
+        else:
+            # Check file extension as fallback
+            filename = file.filename or ''
+            ext = filename.split('.')[-1].lower() if '.' in filename else ''
+            if ext in ['jpg', 'jpeg', 'png', 'webp', 'gif']:
+                is_image = True
+                if ext == 'png':
+                    image_format = 'png'
+                elif ext in ['jpg', 'jpeg']:
+                    image_format = 'jpeg'
+                elif ext == 'webp':
+                    image_format = 'webp'
+                elif ext == 'gif':
+                    image_format = 'gif'
+            else:
+                # Check magic bytes (file signature)
+                if len(file_content) >= 4:
+                    # JPEG: FF D8 FF
+                    if file_content[0:3] == b'\xFF\xD8\xFF':
+                        is_image = True
+                        image_format = 'jpeg'
+                    # PNG: 89 50 4E 47
+                    elif file_content[0:4] == b'\x89\x50\x4E\x47':
+                        is_image = True
+                        image_format = 'png'
+                    # GIF: 47 49 46 38
+                    elif file_content[0:4] == b'\x47\x49\x46\x38':
+                        is_image = True
+                        image_format = 'gif'
+                    # WebP: RIFF...WEBP
+                    elif len(file_content) >= 12 and file_content[0:4] == b'RIFF' and file_content[8:12] == b'WEBP':
+                        is_image = True
+                        image_format = 'webp'
+        
+        if not is_image:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="File must be an image (JPEG, PNG, etc.)"
+            )
+        
+        # Convert to base64
+        image_base64 = base64.b64encode(file_content).decode('utf-8')
+        
+        # Create data URL for OpenAI API
+        image_data_url = f"data:image/{image_format};base64,{image_base64}"
+        
+        # Process receipt OCR
+        receipt_data = await _process_receipt_ocr(image_data_url, session)
+        
+        return receipt_data
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to process receipt: {str(e)}"
+        )
+
+
+class SaveReceiptRequest(BaseModel):
+    walletAddress: str
+    receiptData: dict
+    imageUrl: str | None = None
+
+
+@app.post("/api/receipts/save")
+async def save_receipt(
+    payload: SaveReceiptRequest,
+    session: SessionDep,
+) -> dict:
+    """Save a receipt to the database."""
+    try:
+        wallet_address = _normalize_wallet_address(payload.walletAddress)
+        receipt_data = payload.receiptData
+        
+        # Extract store_name and receipt_time from receipt_data
+        store_name = receipt_data.get("store", {}).get("name") or None
+        receipt_time = None
+        invoice_data = receipt_data.get("invoice", {})
+        if invoice_data.get("date"):
+            try:
+                date_str = invoice_data["date"]
+                time_str = invoice_data.get("time", "00:00:00")
+                if time_str and time_str != "00:00:00":
+                    datetime_str = f"{date_str} {time_str}"
+                    try:
+                        receipt_time = datetime.strptime(datetime_str, "%Y-%m-%d %H:%M:%S")
+                    except ValueError:
+                        try:
+                            receipt_time = datetime.strptime(datetime_str, "%Y-%m-%d %H:%M")
+                        except ValueError:
+                            pass
+                if receipt_time is None:
+                    try:
+                        receipt_time = datetime.strptime(date_str, "%Y-%m-%d")
+                    except ValueError:
+                        pass
+            except (ValueError, TypeError):
+                pass
+        
+        # Determine source_image_url
+        # Don't store base64 data URLs in source_image_url (they're too long and already in receipt_data)
+        source_image_url = ""
+        if payload.imageUrl:
+            # Only store if it's a real URL, not a data URL
+            if not payload.imageUrl.startswith("data:"):
+                source_image_url = payload.imageUrl[:512]  # Truncate to max length
+        elif receipt_data.get("meta", {}).get("source_image"):
+            # Check if it's a data URL
+            meta_image = receipt_data.get("meta", {}).get("source_image", "")
+            if not meta_image.startswith("data:"):
+                source_image_url = meta_image[:512]  # Truncate to max length
+        
+        # Save receipt to database
+        receipt = Receipt(
+            wallet_address=wallet_address,
+            source_image_url=source_image_url,
+            receipt_data=receipt_data,
+            store_name=store_name,
+            receipt_time=receipt_time,
+        )
+        session.add(receipt)
+        await session.flush()
+        
+        # Save receipt items separately
+        items_data = invoice_data.get("items", [])
+        for idx, item_data in enumerate(items_data):
+            receipt_item = ReceiptItem(
+                receipt_id=receipt.id,
+                description=item_data.get("description", ""),
+                barcode=item_data.get("barcode") or None,
+                quantity=float(item_data.get("quantity", 0.0)),
+                unit=item_data.get("unit", "pcs"),
+                unit_price=float(item_data.get("unit_price", 0.0)),
+                discount=float(item_data.get("discount", 0.0)),
+                amount=float(item_data.get("amount", 0.0)),
+                currency=item_data.get("currency", "MYR"),
+                category=item_data.get("category") or None,
+                sub_category=item_data.get("sub_category") or None,
+                display_order=idx + 1,
+            )
+            session.add(receipt_item)
+        
+        await session.commit()
+        
+        return {
+            "success": True,
+            "receipt_id": str(receipt.id),
+            "message": "Receipt saved successfully"
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to save receipt: {str(e)}"
+        )
+
+
+@app.post("/api/transfer-sym-token", response_model=TransferSymTokenResponse)
+async def transfer_sym_token(payload: TransferSymTokenRequest) -> TransferSymTokenResponse:
+    print(f"[TRANSFER] Request received: {payload}")
+    """
+    Transfer SYM tokens from the admin account to a recipient address.
+    
+    Requires APTOS_PRIVATE_KEY, APTOS_ACCOUNT_ADDRESS, and APTOS_NETWORK in .env.local
+    """
+    try:
+        print(f"[TRANSFER] Received request: to_address={payload.to_address}, amount={payload.amount}")
+        
+        # Check if Aptos configuration is set
+        if not settings.aptos_private_key or not settings.aptos_account_address:
+            raise HTTPException(
+                status_code=500,
+                detail="Aptos configuration missing. Please set APTOS_PRIVATE_KEY and APTOS_ACCOUNT_ADDRESS in .env.local"
+            )
+        
+        # Validate and normalize addresses
+        to_address = payload.to_address.strip()
+        if not to_address.startswith('0x'):
+            to_address = '0x' + to_address
+        
+        print(f"[TRANSFER] Normalized to_address: {to_address}")
+        
+        # Validate amount
+        if payload.amount <= 0:
+            print(f"[TRANSFER] Error: Amount is <= 0: {payload.amount}")
+            raise HTTPException(
+                status_code=400,
+                detail="Amount must be greater than 0"
+            )
+        
+        # Convert amount to u64 (SYM has 8 decimals)
+        amount_u64 = int(payload.amount * 100000000)
+        print(f"[TRANSFER] Converted amount: {payload.amount} -> {amount_u64} (u64)")
+        
+        if amount_u64 == 0:
+            print(f"[TRANSFER] Error: Amount converted to 0")
+            raise HTTPException(
+                status_code=400,
+                detail="Amount is too small (minimum is 0.00000001 SYM)"
+            )
+        
+        # Get admin account from settings
+        admin_private_key = settings.aptos_private_key
+        admin_address_str = settings.aptos_account_address.strip()
+        if not admin_address_str.startswith('0x'):
+            admin_address_str = '0x' + admin_address_str
+        
+        module_address_str = settings.sym_token_module_address.strip()
+        if not module_address_str.startswith('0x'):
+            module_address_str = '0x' + module_address_str
+        
+        # Initialize Aptos account
+        # Private key format: "ed25519-priv-0x..." or just hex
+        private_key_hex = admin_private_key
+        if private_key_hex.startswith('ed25519-priv-0x'):
+            private_key_hex = private_key_hex.replace('ed25519-priv-0x', '')
+        elif private_key_hex.startswith('0x'):
+            private_key_hex = private_key_hex[2:]
+        
+        # Create account from private key
+        private_key_bytes = bytes.fromhex(private_key_hex)
+        admin_account = Account.load_key(private_key_bytes)
+        
+        # Verify account address matches
+        # AccountAddress.__str__() returns the hex string with 0x prefix
+        admin_account_address_str = str(admin_account.address())
+        # Normalize both addresses for comparison (ensure 0x prefix)
+        admin_account_normalized = admin_account_address_str.lower()
+        admin_address_normalized = admin_address_str.lower()
+        if admin_account_normalized != admin_address_normalized:
+            raise HTTPException(
+                status_code=500,
+                detail="Account address mismatch. Please verify APTOS_PRIVATE_KEY and APTOS_ACCOUNT_ADDRESS match."
+            )
+        
+        # Initialize AptosClient based on network
+        network = (settings.aptos_network or "testnet").lower()
+        print(f"[TRANSFER] Network: {network}")
+        if network == "testnet":
+            node_url = "https://fullnode.testnet.aptoslabs.com/v1"
+        elif network == "mainnet":
+            node_url = "https://fullnode.mainnet.aptoslabs.com/v1"
+        else:
+            print(f"[TRANSFER] Error: Unsupported network: {network}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported network: {network}. Use 'testnet' or 'mainnet'"
+            )
+        
+        print(f"[TRANSFER] Fullnode URL: {node_url}")
+        
+        client = RestClient(node_url)
+        
+        # Validate addresses (EntryFunction.natural will handle string addresses)
+        # Just ensure they're valid hex strings with 0x prefix
+        try:
+            # Quick validation - try parsing to ensure format is correct
+            AccountAddress.from_str(admin_address_str)
+            AccountAddress.from_str(to_address)
+            print(f"[TRANSFER] Addresses validated successfully")
+        except Exception as e:
+            print(f"[TRANSFER] Error validating addresses: {e}")
+            raise ValueError(f"Invalid address format: {str(e)}")
+        
+        # Build and submit transaction using JSON format (more reliable than BCS)
+        # Function: pdtt::sym_token::transfer(admin: &signer, from: address, to: address, amount: u64)
+        # Note: admin: &signer is implicit (the transaction sender), so we only pass: from, to, amount
+        try:
+            print(f"[TRANSFER] Building JSON transaction...")
+            print(f"[TRANSFER] Admin account address: {str(admin_account.address())}")
+            print(f"[TRANSFER] Entry function: {module_address_str}::sym_token::transfer")
+            
+            # Test fullnode connectivity first by getting chain ID
+            try:
+                chain_id = await client.chain_id()
+                print(f"[TRANSFER] Chain ID: {chain_id}")
+            except json.JSONDecodeError as e:
+                print(f"[TRANSFER] Error: Fullnode returned empty response. Check network connectivity.")
+                raise HTTPException(
+                    status_code=503,
+                    detail="Failed to connect to Aptos fullnode. The fullnode returned an empty response. Please check your network connection and try again."
+                )
+            except Exception as e:
+                print(f"[TRANSFER] Error getting chain ID: {e}")
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Failed to connect to Aptos fullnode: {str(e)}"
+                )
+            
+            # Get account sequence number
+            sequence_number = await client.account_sequence_number(admin_account.address())
+            print(f"[TRANSFER] Sequence number: {sequence_number}")
+            
+            # Build JSON transaction payload
+            import time
+            import httpx
+            
+            sender = str(admin_account.address())
+            max_gas_amount = 100000
+            gas_unit_price = 100
+            expiration_timestamp_secs = int(time.time()) + 600
+            
+            # Build unsigned transaction payload
+            transaction_payload = {
+                "sender": sender,
+                "sequence_number": str(sequence_number),
+                "max_gas_amount": str(max_gas_amount),
+                "gas_unit_price": str(gas_unit_price),
+                "expiration_timestamp_secs": str(expiration_timestamp_secs),
+                "payload": {
+                    "type": "entry_function_payload",
+                    "function": f"{module_address_str}::sym_token::transfer",
+                    "type_arguments": [],
+                    "arguments": [
+                        admin_address_str,  # from address
+                        to_address,        # to address
+                        str(amount_u64)     # amount
+                    ]
+                }
+            }
+            
+            print(f"[TRANSFER] Transaction payload created")
+            
+            # Create entry function - EntryFunction.natural() expects strings
+            from aptos_sdk.transactions import EntryFunction, SignedTransaction, TransactionPayload, TransactionArgument
+            
+            entry_function = EntryFunction.natural(
+                f"{module_address_str}::sym_token",
+                "transfer",
+                [],
+                [TransactionArgument(admin_account.address(), Serializer.struct), 
+                 TransactionArgument(AccountAddress.from_str(to_address), Serializer.struct), 
+                 TransactionArgument(amount_u64, Serializer.u64)],  # All strings as expected
+            )
+            
+            # Create and sign BCS transaction using the SDK's helper method
+            print(f"[TRANSFER] Creating and signing BCS transaction...")
+            try:
+                # Try using create_bcs_signed_transaction if available
+                signed_transaction = await client.create_bcs_signed_transaction(
+                    admin_account, 
+                    TransactionPayload(entry_function)
+                )
+                print(f"[TRANSFER] Transaction created and signed using create_bcs_signed_transaction")
+            except (AttributeError, TypeError) as e:
+                # Fall back to manual creation if method doesn't exist or has different signature
+                print(f"[TRANSFER] create_bcs_signed_transaction not available, using manual method: {e}")
+                raw_transaction = await client.create_bcs_transaction(admin_account, entry_function)
+                authenticator = admin_account.sign_transaction(raw_transaction)
+                signed_transaction = SignedTransaction(raw_transaction, authenticator)
+                print(f"[TRANSFER] Transaction created and signed manually")
+            
+            # Try submitting BCS transaction first
+            print(f"[TRANSFER] Attempting BCS transaction submission...")
+            try:
+                result = await client.submit_bcs_transaction(signed_transaction)
+                print(f"[TRANSFER] BCS transaction submitted successfully: {result}")
+                await client.wait_for_transaction(result)
+                print(f"[TRANSFER] BCS transaction confirmed")
+                transaction_hash = result
+            except Exception as bcs_error:
+                error_msg = str(bcs_error)
+                print(f"[TRANSFER] BCS submission failed: {error_msg}")
+                
+                # Fall back to JSON submission
+                print(f"[TRANSFER] Falling back to JSON transaction submission...")
+                
+                # Extract public key and signature from signed transaction
+                authenticator = signed_transaction.authenticator
+                auth_str = str(authenticator)
+                import re
+                pk_match = re.search(r'PublicKey: (0x[a-fA-F0-9]+)', auth_str)
+                sig_match = re.search(r'Signature: (0x[a-fA-F0-9]+)', auth_str)
+                if not pk_match or not sig_match:
+                    raise ValueError("Could not extract public key or signature from authenticator")
+                
+                public_key_hex = pk_match.group(1)
+                signature_hex = sig_match.group(1)
+                
+                # Add signature to JSON transaction payload
+                transaction_payload["signature"] = {
+                    "type": "ed25519_signature",
+                    "public_key": public_key_hex,
+                    "signature": signature_hex
+                }
+                
+                # Submit JSON transaction
+                print(f"[TRANSFER] Submitting JSON transaction...")
+                async with httpx.AsyncClient(timeout=30.0) as http_client:
+                    response = await http_client.post(
+                        f"{client.base_url}/transactions",
+                        headers={"Content-Type": "application/json"},
+                        json=transaction_payload,
+                    )
+                    
+                    if response.status_code >= 400:
+                        print(f"[TRANSFER] JSON submission error: {response.status_code} - {response.text}")
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"Transaction submission failed with both BCS and JSON. BCS error: {error_msg}. JSON error: {response.text}"
+                        )
+                    
+                    result = response.json()
+                    transaction_hash = result.get("hash") or result.get("version") or str(result)
+                    print(f"[TRANSFER] JSON transaction submitted: {transaction_hash}")
+                    
+                    # Wait for confirmation
+                    print(f"[TRANSFER] Waiting for transaction confirmation...")
+                    await client.wait_for_transaction(transaction_hash)
+                    print(f"[TRANSFER] Transaction confirmed")
+        except json.JSONDecodeError as e:
+            error_msg = str(e)
+            print(f"[TRANSFER] JSONDecodeError: {error_msg}")
+            import traceback
+            print(f"[TRANSFER] JSONDecodeError Traceback: {traceback.format_exc()}")
+            raise HTTPException(
+                status_code=503,
+                detail="Failed to connect to Aptos fullnode. The fullnode returned an empty or invalid response. Please check your network connection and ensure the fullnode is accessible."
+            )
+        except Exception as e:
+            error_msg = str(e)
+            print(f"[TRANSFER] Error in transaction processing: {e}")
+            import traceback
+            print(f"[TRANSFER] Traceback: {traceback.format_exc()}")
+            # Check if it's a network-related error
+            if "Expecting value" in error_msg or "JSONDecodeError" in str(type(e).__name__):
+                raise HTTPException(
+                    status_code=503,
+                    detail="Failed to connect to Aptos fullnode. Please check your network connection and try again."
+                )
+            raise
+        
+        return TransferSymTokenResponse(
+            success=True,
+            transaction_hash=transaction_hash,
+            message=f"Successfully transferred {payload.amount} SYM tokens to {to_address}"
+        )
+        
+    except HTTPException:
+        raise
+    except ValueError as e:
+        error_msg = str(e)
+        print(f"[TRANSFER] ValueError: {error_msg}")
+        import traceback
+        print(f"[TRANSFER] ValueError Traceback: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid address or amount format: {error_msg}"
+        )
+    except json.JSONDecodeError as e:
+        error_msg = str(e)
+        print(f"[TRANSFER] JSONDecodeError: {error_msg}")
+        import traceback
+        print(f"[TRANSFER] JSONDecodeError Traceback: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid response format: {error_msg}"
+        )
+    except Exception as e:
+        error_msg = str(e)
+        print(f"[TRANSFER] Exception: {error_msg}")
+        import traceback
+        print(f"[TRANSFER] Exception Traceback: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to transfer SYM tokens: {error_msg}"
+        )
 
 
 if __name__ == "__main__":

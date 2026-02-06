@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button"
 import { Loader2, ArrowLeft, TrendingUp, TrendingDown, Lightbulb, PieChart, Calendar, Share2, Shield } from "lucide-react"
 import { ReceiptViewer } from "@/components/receipt-viewer"
 import Link from "next/link"
+import { useRouter } from "next/navigation"
 import Image from "next/image"
 import {
   Dialog,
@@ -147,6 +148,7 @@ interface CategoriesResponse {
 
 export default function ReceiptsPage() {
   const { account, connected } = useWallet()
+  const router = useRouter()
   const [spendingData, setSpendingData] = useState<MonthlySpendingResponse | null>(null)
   const [allReceipts, setAllReceipts] = useState<Receipt[]>([])
   const [categories, setCategories] = useState<Category[]>([])
@@ -545,8 +547,8 @@ export default function ReceiptsPage() {
                   <Button
                     variant="web3"
                     onClick={() => {
-                      // TODO: Implement share to earn functionality
                       setShareDialogOpen(false)
+                      router.push("/share-to-earn")
                     }}
                   >
                     Share & Earn
